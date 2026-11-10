@@ -10,11 +10,64 @@ export interface ProviderModelItem {
 export interface ListModelsResult {
   provider: SupportedProvider;
   models: ProviderModelItem[];
+  live: boolean;
+  warning?: string;
 }
 
 /**
+ * Standard fallback models when a provider's live discovery endpoint is unreachable,
+ * offline, or experiencing network connect timeouts.
+ */
+export const PROVIDER_FALLBACK_MODELS: Record<SupportedProvider, ProviderModelItem[]> = {
+  groq: [
+    { id: 'llama-3.3-70b-versatile', name: 'llama-3.3-70b-versatile (Llama 3.3 70B)' },
+    { id: 'llama-3.3-70b-specdec', name: 'llama-3.3-70b-specdec (Speculative Decoding)' },
+    { id: 'llama-3.1-70b-versatile', name: 'llama-3.1-70b-versatile (Llama 3.1 70B)' },
+    { id: 'llama-3.1-8b-instant', name: 'llama-3.1-8b-instant (Fast)' },
+    { id: 'deepseek-r1-distill-llama-70b', name: 'deepseek-r1-distill-llama-70b (Reasoning)' },
+    { id: 'mixtral-8x7b-32768', name: 'mixtral-8x7b-32768 (Long Context)' },
+  ],
+  openai: [
+    { id: 'gpt-4o', name: 'gpt-4o (Flagship Omni)' },
+    { id: 'gpt-4o-mini', name: 'gpt-4o-mini (Fast)' },
+    { id: 'o1', name: 'o1 (Deep Reasoning)' },
+    { id: 'o1-mini', name: 'o1-mini' },
+    { id: 'o3-mini', name: 'o3-mini (Reasoning)' },
+  ],
+  anthropic: [
+    { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' },
+    { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku' },
+    { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus' },
+  ],
+  gemini: [
+    { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' },
+    { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
+    { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
+  ],
+  deepseek: [
+    { id: 'deepseek-chat', name: 'deepseek-chat (V3)' },
+    { id: 'deepseek-reasoner', name: 'deepseek-reasoner (R1)' },
+  ],
+  xai: [
+    { id: 'grok-2-1212', name: 'grok-2-1212' },
+    { id: 'grok-2-vision-1212', name: 'grok-2-vision-1212' },
+    { id: 'grok-beta', name: 'grok-beta' },
+  ],
+  cohere: [
+    { id: 'command-r-plus-08-2024', name: 'command-r-plus-08-2024' },
+    { id: 'command-r-08-2024', name: 'command-r-08-2024' },
+  ],
+  openrouter: [
+    { id: 'anthropic/claude-3.5-sonnet', name: 'Anthropic: Claude 3.5 Sonnet' },
+    { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Meta: Llama 3.3 70B Instruct' },
+    { id: 'deepseek/deepseek-chat', name: 'DeepSeek: DeepSeek Chat' },
+  ],
+};
+
+/**
  * Fetch the ACTUAL list of live models directly from the provider's API.
- * No hardcoded presets - queries the live endpoint using the provided API key.
+ * Uses a tight 4.5-second timeout and gracefully falls back to standard models
+ * if a network connection failure (e.g. connect timeout, offline, proxy issue) occurs.
  */
 export async function listProviderModels(
   provider: SupportedProvider,
@@ -27,33 +80,63 @@ export async function listProviderModels(
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 12000);
+  const timeoutId = setTimeout(() => controller.abort(), 4500);
 
   try {
+    let result: ListModelsResult;
     switch (provider) {
       case 'groq':
-        return await fetchGroqModels(trimmedKey, controller.signal, customBaseUrl);
+        result = await fetchGroqModels(trimmedKey, controller.signal, customBaseUrl);
+        break;
       case 'openai':
-        return await fetchOpenAIModels(trimmedKey, controller.signal, customBaseUrl);
+        result = await fetchOpenAIModels(trimmedKey, controller.signal, customBaseUrl);
+        break;
       case 'anthropic':
-        return await fetchAnthropicModels(trimmedKey, controller.signal);
+        result = await fetchAnthropicModels(trimmedKey, controller.signal);
+        break;
       case 'gemini':
-        return await fetchGeminiModels(trimmedKey, controller.signal);
+        result = await fetchGeminiModels(trimmedKey, controller.signal);
+        break;
       case 'deepseek':
-        return await fetchDeepSeekModels(trimmedKey, controller.signal, customBaseUrl);
+        result = await fetchDeepSeekModels(trimmedKey, controller.signal, customBaseUrl);
+        break;
       case 'xai':
-        return await fetchXAIModels(trimmedKey, controller.signal, customBaseUrl);
+        result = await fetchXAIModels(trimmedKey, controller.signal, customBaseUrl);
+        break;
       case 'cohere':
-        return await fetchCohereModels(trimmedKey, controller.signal);
+        result = await fetchCohereModels(trimmedKey, controller.signal);
+        break;
       case 'openrouter':
-        return await fetchOpenRouterModels(trimmedKey, controller.signal);
+        result = await fetchOpenRouterModels(trimmedKey, controller.signal);
+        break;
       default:
         throw new Error(`Unsupported provider: ${provider}`);
     }
+    return result;
   } catch (err: any) {
-    if (err.name === 'AbortError') {
-      throw new Error(`Connection timed out while fetching models from ${provider}.`);
+    const isNetworkError =
+      err.name === 'AbortError' ||
+      err.message?.includes('fetch failed') ||
+      err.message?.includes('Connect Timeout') ||
+      err.cause?.code === 'UND_ERR_CONNECT_TIMEOUT' ||
+      err.cause?.code === 'ETIMEDOUT' ||
+      err.cause?.code === 'ENOTFOUND' ||
+      err.cause?.code === 'ECONNREFUSED';
+
+    // If it's a network timeout/connectivity issue, fall back gracefully to standard models
+    if (isNetworkError) {
+      console.warn(
+        `[listProviderModels] Network connection to ${provider} models timed out or failed. Using fallback list.`
+      );
+      return {
+        provider,
+        models: PROVIDER_FALLBACK_MODELS[provider] || [],
+        live: false,
+        warning: `Live query to ${provider} timed out. Showing standard models.`,
+      };
     }
+
+    // Auth errors (401, 403, etc.) are explicitly thrown so the user is informed
     throw err;
   } finally {
     clearTimeout(timeoutId);
@@ -91,12 +174,11 @@ async function fetchGroqModels(
   const json = await res.json();
   const data: any[] = json.data || [];
 
-  // Filter out audio / whisper / non-chat models
   const models: ProviderModelItem[] = data
     .filter((m) => {
       if (m.active === false) return false;
       const id = (m.id || '').toLowerCase();
-      if (id.includes('whisper')) return false;
+      if (id.includes('whisper') || id.includes('audio')) return false;
       return true;
     })
     .map((m) => ({
@@ -105,7 +187,6 @@ async function fetchGroqModels(
       contextWindow: m.context_window,
     }))
     .sort((a, b) => {
-      // Put popular llama / deepseek models first
       const aLlama = a.id.toLowerCase().includes('llama');
       const bLlama = b.id.toLowerCase().includes('llama');
       if (aLlama && !bLlama) return -1;
@@ -113,7 +194,7 @@ async function fetchGroqModels(
       return a.id.localeCompare(b.id);
     });
 
-  return { provider: 'groq', models };
+  return { provider: 'groq', models, live: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -169,15 +250,12 @@ async function fetchOpenAIModels(
       name: m.id,
     }))
     .sort((a, b) => {
-      // Sort newer models (gpt-4, gpt-5, gpt-6, o1, o3) towards top
       const getPriority = (id: string) => {
         const lower = id.toLowerCase();
-        if (lower.startsWith('gpt-6')) return 1;
-        if (lower.startsWith('gpt-5')) return 2;
-        if (lower.startsWith('o3')) return 3;
-        if (lower.startsWith('o1')) return 4;
-        if (lower.startsWith('gpt-4o')) return 5;
-        if (lower.startsWith('gpt-4')) return 6;
+        if (lower.startsWith('gpt-4o')) return 1;
+        if (lower.startsWith('o3')) return 2;
+        if (lower.startsWith('o1')) return 3;
+        if (lower.startsWith('gpt-4')) return 4;
         return 10;
       };
       const diff = getPriority(a.id) - getPriority(b.id);
@@ -185,7 +263,7 @@ async function fetchOpenAIModels(
       return a.id.localeCompare(b.id);
     });
 
-  return { provider: 'openai', models };
+  return { provider: 'openai', models, live: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +301,7 @@ async function fetchAnthropicModels(
     name: m.display_name ? `${m.display_name} (${m.id})` : m.id,
   }));
 
-  return { provider: 'anthropic', models };
+  return { provider: 'anthropic', models, live: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -257,14 +335,12 @@ async function fetchGeminiModels(
   const json = await res.json();
   const rawModels: any[] = json.models || [];
 
-  // Filter models that support content generation
   const models: ProviderModelItem[] = rawModels
     .filter((m) => {
       const methods: string[] = m.supportedGenerationMethods || [];
       return methods.includes('generateContent');
     })
     .map((m) => {
-      // Strip 'models/' prefix
       const cleanId = (m.name || '').replace(/^models\//, '');
       return {
         id: cleanId,
@@ -274,7 +350,7 @@ async function fetchGeminiModels(
     })
     .sort((a, b) => a.id.localeCompare(b.id));
 
-  return { provider: 'gemini', models };
+  return { provider: 'gemini', models, live: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +389,7 @@ async function fetchDeepSeekModels(
     name: m.id,
   }));
 
-  return { provider: 'deepseek', models };
+  return { provider: 'deepseek', models, live: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +430,7 @@ async function fetchXAIModels(
       name: m.id,
     }));
 
-  return { provider: 'xai', models };
+  return { provider: 'xai', models, live: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +468,7 @@ async function fetchCohereModels(
     contextWindow: m.context_length,
   }));
 
-  return { provider: 'cohere', models };
+  return { provider: 'cohere', models, live: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -431,5 +507,5 @@ async function fetchOpenRouterModels(
     description: m.description,
   }));
 
-  return { provider: 'openrouter', models };
+  return { provider: 'openrouter', models, live: true };
 }

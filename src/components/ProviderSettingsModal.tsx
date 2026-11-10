@@ -52,10 +52,11 @@ export function ProviderSettingsModal({
   const [apiKey, setApiKey] = useState<string>(activeConfig.apiKey || '');
   const [showKey, setShowKey] = useState(false);
 
-  // Live model discovery states (no hardcoded presets)
+  // Live model discovery states
   const [models, setModels] = useState<DiscoveredModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState<boolean>(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [isCustomModel, setIsCustomModel] = useState<boolean>(false);
 
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -71,11 +72,13 @@ export function ProviderSettingsModal({
       if (!hasKeyAvailable) {
         setModels([]);
         setFetchError(null);
+        setWarning(null);
         return;
       }
 
       setIsLoadingModels(true);
       setFetchError(null);
+      setWarning(null);
 
       try {
         const res = await fetch('/api/models', {
@@ -90,10 +93,14 @@ export function ProviderSettingsModal({
         const data = await res.json();
         if (!res.ok) {
           setFetchError(data.error || `Failed to fetch models from ${PROVIDER_NAMES[prov]}`);
-          setModels([]);
+          if (data.models && data.models.length > 0) {
+            setModels(data.models);
+          }
         } else {
           const returnedModels: DiscoveredModel[] = data.models || [];
           setModels(returnedModels);
+          setWarning(data.warning || null);
+          setFetchError(null);
 
           if (returnedModels.length > 0) {
             setSelectedModel((current) => {
@@ -106,7 +113,6 @@ export function ProviderSettingsModal({
         }
       } catch (err: any) {
         setFetchError(`Network error contacting ${PROVIDER_NAMES[prov]} models endpoint.`);
-        setModels([]);
       } finally {
         setIsLoadingModels(false);
       }
@@ -144,6 +150,7 @@ export function ProviderSettingsModal({
   const handleProviderChange = (newProvider: SupportedProvider) => {
     setSelectedProvider(newProvider);
     setFetchError(null);
+    setWarning(null);
     setModels([]);
     setIsCustomModel(false);
 
@@ -302,7 +309,7 @@ export function ProviderSettingsModal({
           <div>
             <div className="flex items-center justify-between mb-1">
               <label className="text-xs font-semibold uppercase text-gray-600">
-                Active Model (Live from {PROVIDER_NAMES[selectedProvider]}):
+                Active Model ({PROVIDER_NAMES[selectedProvider]}):
               </label>
               <button
                 type="button"
@@ -313,39 +320,45 @@ export function ProviderSettingsModal({
               </button>
             </div>
 
+            {/* Warning banner (e.g. timeout fallback notice) */}
+            {warning && (
+              <div className="mb-2 p-2 bg-amber-50 border border-amber-300 rounded text-amber-800 text-xs flex items-center justify-between">
+                <span>⚠️ {warning}</span>
+                <button
+                  type="button"
+                  onClick={() => fetchLiveModels(selectedProvider, apiKey)}
+                  className="text-[11px] underline font-semibold ml-2 hover:text-amber-950"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {/* Error banner (e.g. invalid key) */}
+            {fetchError && (
+              <div className="mb-2 p-2 bg-red-50 border border-red-300 rounded text-red-800 text-xs flex items-center justify-between">
+                <span>✕ {fetchError}</span>
+                <button
+                  type="button"
+                  onClick={() => fetchLiveModels(selectedProvider, apiKey)}
+                  className="text-[11px] underline font-semibold ml-2 hover:text-red-950"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
             {isLoadingModels ? (
               <div className="w-full p-3 border-2 border-dashed border-orange-300 rounded bg-orange-50/50 text-orange-800 text-xs flex items-center gap-2">
                 <span className="animate-spin inline-block">⏳</span>
                 <span>Fetching live model list from {PROVIDER_NAMES[selectedProvider]} API...</span>
-              </div>
-            ) : fetchError ? (
-              <div className="space-y-2">
-                <div className="p-3 bg-red-50 border border-red-300 rounded text-red-800 text-xs">
-                  <strong>Could not load models:</strong> {fetchError}
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    placeholder="Enter model ID manually (e.g. llama-3.1-70b-versatile)..."
-                    className="flex-1 p-2 border-2 border-gray-300 rounded focus:border-orange-500 focus:outline-none font-mono text-sm"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => fetchLiveModels(selectedProvider, apiKey)}
-                    className="px-3 py-2 bg-gray-200 hover:bg-gray-300 rounded text-xs font-semibold cursor-pointer"
-                  >
-                    Retry
-                  </button>
-                </div>
               </div>
             ) : isCustomModel ? (
               <input
                 type="text"
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                placeholder="Enter model ID manually..."
+                placeholder="Enter model ID manually (e.g. llama-3.1-70b-versatile)..."
                 className="w-full p-2.5 border-2 border-gray-300 rounded focus:border-orange-500 focus:outline-none font-mono text-sm"
               />
             ) : models.length > 0 ? (
@@ -361,9 +374,18 @@ export function ProviderSettingsModal({
                 ))}
               </select>
             ) : (
-              <div className="p-3 bg-gray-50 border border-dashed border-gray-300 rounded text-gray-600 text-xs">
-                Enter your {PROVIDER_NAMES[selectedProvider]} API key above to load available
-                models, or click &ldquo;Enter Custom ID&rdquo; to type a model name.
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  placeholder="Enter model ID manually (e.g. llama-3.1-70b-versatile)..."
+                  className="w-full p-2.5 border-2 border-gray-300 rounded focus:border-orange-500 focus:outline-none font-mono text-sm"
+                />
+                <div className="text-[11px] text-gray-500 italic">
+                  Enter your {PROVIDER_NAMES[selectedProvider]} API key above to load available
+                  models, or enter a model ID manually.
+                </div>
               </div>
             )}
           </div>

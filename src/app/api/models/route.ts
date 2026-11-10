@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { listProviderModels } from '@/lib/agent/providers/list-models';
+import { listProviderModels, PROVIDER_FALLBACK_MODELS } from '@/lib/agent/providers/list-models';
 import { getConfig } from '@/lib/config';
 import type { SupportedProvider } from '@/types/chat';
 
@@ -69,7 +69,8 @@ export async function POST(req: NextRequest) {
     if (!resolvedKey) {
       return NextResponse.json(
         {
-          error: `No API key found for ${provider}. Please enter your ${provider} API key to fetch actual models.`,
+          error: `No API key found for ${provider}. Please enter your ${provider} API key to fetch models.`,
+          models: PROVIDER_FALLBACK_MODELS[provider as SupportedProvider] || [],
         },
         { status: 400 }
       );
@@ -84,9 +85,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       provider: result.provider,
       models: result.models,
+      live: result.live,
+      warning: result.warning,
     });
   } catch (err: any) {
-    const message = err.message || 'Failed to fetch models from provider';
+    const message = err.message || err.cause?.message || 'Failed to fetch models from provider';
+    console.warn(`[POST /api/models] Provider error: ${message}`);
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

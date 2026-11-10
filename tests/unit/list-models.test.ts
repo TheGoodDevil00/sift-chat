@@ -102,4 +102,15 @@ describe('listProviderModels', () => {
       'Groq models error (401): Invalid API Key provided.'
     );
   });
+
+  it('falls back to standard models gracefully when network connect timeout occurs', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('fetch failed'));
+
+    const result = await listProviderModels('groq', 'gsk_test_key');
+    expect(result.provider).toBe('groq');
+    expect(result.live).toBe(false);
+    expect(result.warning).toContain('timed out');
+    expect(result.models.length).toBeGreaterThan(0);
+    expect(result.models.some((m) => m.id.includes('llama'))).toBe(true);
+  });
 });
