@@ -11,6 +11,7 @@ import {
   webSearchToolSchema,
   type SearchEvidence,
 } from './tools/web-search';
+import { listProviderModels } from './providers/list-models';
 import {
   normalizeSources,
   extractCitationsFromText,
@@ -32,7 +33,7 @@ export interface AgentRunResult {
 }
 
 /**
- * Universal agent runner implementing the hiring challenge single-tool execution loop:
+ * Universal agent runner implementing the single-tool execution loop:
  *
  * Receive message -> Construct context -> Invoke LLM -> Tool call?
  *   - Yes: Validate web_search args -> Execute search pipeline -> Persist evidence -> Return tool result to LLM -> Invoke LLM
@@ -73,14 +74,35 @@ export async function runAgent(
   // 2. Resolve Model
   let model = providerConfig?.model?.trim();
   if (!model) {
-    if (provider === 'openai') model = config.openaiModel || 'gpt-6-astra';
-    else if (provider === 'anthropic') model = config.anthropicModel || 'claude-sonnet-5-5';
-    else if (provider === 'gemini') model = config.geminiModel || 'gemini-3.8-flash';
-    else if (provider === 'deepseek') model = config.deepseekModel || 'deepseek-flash';
-    else if (provider === 'xai') model = config.xaiModel || 'grok-4.7';
-    else if (provider === 'cohere') model = config.cohereModel || 'command-a-plus-05-2026';
-    else if (provider === 'openrouter') model = config.openrouterModel || 'openai/gpt-5.6-sol';
-    else if (provider === 'groq') model = config.groqModel || 'llama-3.3-70b-versatile';
+    if (provider === 'openai') model = config.openaiModel;
+    else if (provider === 'anthropic') model = config.anthropicModel;
+    else if (provider === 'gemini') model = config.geminiModel;
+    else if (provider === 'deepseek') model = config.deepseekModel;
+    else if (provider === 'xai') model = config.xaiModel;
+    else if (provider === 'cohere') model = config.cohereModel;
+    else if (provider === 'openrouter') model = config.openrouterModel;
+    else if (provider === 'groq') model = config.groqModel;
+  }
+
+  // If still no model specified, dynamically query the provider's /models endpoint to get actual available model
+  if (!model) {
+    try {
+      const liveData = await listProviderModels(provider, apiKey, providerConfig?.customBaseUrl);
+      if (liveData.models && liveData.models.length > 0) {
+        model = liveData.models[0].id;
+      }
+    } catch (listErr: any) {
+      console.warn(`Could not auto-fetch models for ${provider}:`, listErr.message);
+    }
+  }
+
+  if (!model) {
+    return {
+      success: false,
+      errorCode: 'MISSING_MODEL',
+      errorMessage: `No model specified for ${provider}. Please select an active model from provider settings.`,
+      retryable: false,
+    };
   }
 
   const fullInstructions = `${SIFT_SYSTEM_PROMPT}\n\n${prepared.systemPromptAdditions}`;

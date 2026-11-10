@@ -9,6 +9,7 @@ import {
   GET as getConversationDetailHandler,
   DELETE as deleteConversationHandler,
 } from '@/app/api/conversations/[id]/route';
+import { POST as modelsHandler } from '@/app/api/models/route';
 import { NextRequest } from 'next/server';
 
 describe('API Routes Integration', () => {
@@ -53,5 +54,52 @@ describe('API Routes Integration', () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(Array.isArray(data.conversations)).toBe(true);
+  });
+
+  it('rejects POST /api/models when no key is provided and none in env', async () => {
+    const req = new NextRequest('http://localhost:3000/api/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: 'groq',
+        apiKey: '',
+      }),
+    });
+    const res = await modelsHandler(req);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain('No API key found for groq');
+  });
+
+  it('fetches models via POST /api/models with valid payload', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = async () =>
+      ({
+        ok: true,
+        json: async () => ({
+          object: 'list',
+          data: [
+            { id: 'llama-3.1-70b-versatile', active: true },
+            { id: 'llama-3.3-70b-specdec', active: true },
+          ],
+        }),
+      } as any);
+
+    try {
+      const req = new NextRequest('http://localhost:3000/api/models', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: 'groq',
+          apiKey: 'gsk_test123',
+        }),
+      });
+      const res = await modelsHandler(req);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.provider).toBe('groq');
+      expect(data.models.length).toBe(2);
+      expect(data.models[0].id).toBe('llama-3.1-70b-versatile');
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 });

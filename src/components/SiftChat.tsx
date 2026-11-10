@@ -64,7 +64,7 @@ export function SiftChat() {
 
           // Restore stored preferences from browser localStorage
           const savedProvider = (localStorage.getItem('sift_active_provider') as SupportedProvider) || data.defaultProvider || 'openai';
-          const savedModel = localStorage.getItem(`sift_model_${savedProvider}`) || data.availableModels[savedProvider]?.[0]?.id || 'gpt-6-astra';
+          const savedModel = localStorage.getItem(`sift_model_${savedProvider}`) || data.defaultModels?.[savedProvider] || '';
           const savedKey = localStorage.getItem(`sift_key_${savedProvider}`) || '';
 
           const restoredConfig: ClientProviderConfig = {
@@ -334,7 +334,9 @@ export function SiftChat() {
             >
               <span className="w-1.5 h-1.5 bg-orange-500 rounded-full" />
               <span className="font-semibold uppercase">{providerConfig.provider}</span>
-              <span className="text-gray-400 hidden lg:inline">({providerConfig.model})</span>
+              <span className="text-gray-400 hidden lg:inline">
+                ({providerConfig.model || 'select model'})
+              </span>
               <span className="text-gray-400 text-[10px]">⚙</span>
             </button>
 
