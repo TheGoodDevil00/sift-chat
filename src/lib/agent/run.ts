@@ -17,6 +17,7 @@ import {
   extractCitationsFromText,
   normalizeCitations,
 } from '../citations/normalize';
+import { scrubSensitiveStrings } from '../crypto/scrub';
 import type { ChatPhase, ClientProviderConfig, SupportedProvider } from '@/types/chat';
 
 export interface AgentRunCallbacks {
@@ -665,7 +666,7 @@ function handleProviderError(err: any, providerLabel: string, signal?: AbortSign
   return {
     success: false,
     errorCode: 'MODEL_REQUEST_FAILED',
-    errorMessage: `${providerLabel} request failed: ${msg}`,
+    errorMessage: `${providerLabel} request failed: ${scrubSensitiveStrings(msg)}`,
     retryable: true,
   };
 }

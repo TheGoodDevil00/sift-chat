@@ -17,7 +17,15 @@ import { StatusIndicator } from './StatusIndicator';
 import {
   ProviderSettingsModal,
   type ProviderServerStatus,
+  ALL_SUPPORTED_PROVIDERS,
+  PROVIDER_LABELS,
 } from './ProviderSettingsModal';
+import {
+  getProviderKey,
+  getVaultStatuses,
+  migrateLegacyPlaintextKeys,
+  type ProviderKeyStatus,
+} from '@/lib/crypto/vault';
 
 export function SiftChat() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -55,12 +63,33 @@ export function SiftChat() {
 
   // Multi-provider configuration state
   const [serverStatus, setServerStatus] = useState<ProviderServerStatus | null>(null);
+  const [vaultStatuses, setVaultStatuses] = useState<
+    Record<SupportedProvider, ProviderKeyStatus>
+  >({} as Record<SupportedProvider, ProviderKeyStatus>);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isProviderMenuOpen, setIsProviderMenuOpen] = useState(false);
   const [isSoftPrompt, setIsSoftPrompt] = useState(false);
   const [providerConfig, setProviderConfig] = useState<ClientProviderConfig>({
-    provider: 'openai',
-    model: 'gpt-6-astra',
+    provider: 'groq',
+    model: 'llama-3.3-70b-versatile',
   });
+  const providerMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close provider menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        providerMenuRef.current &&
+        !providerMenuRef.current.contains(event.target as Node)
+      ) {
+        setIsProviderMenuOpen(false);
+      }
+    }
+    if (isProviderMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [isProviderMenuOpen]);
 
   // Detect user's local IANA timezone
   const [timezone] = useState(() => {
@@ -72,10 +101,14 @@ export function SiftChat() {
     }
   });
 
-  // Fetch server provider & env status on page load
+  // Fetch server provider & env status on page load, migrate legacy keys, and initialize encrypted vault
   useEffect(() => {
     async function initConfig() {
       try {
+        await migrateLegacyPlaintextKeys();
+        const initialVaultStatuses = await getVaultStatuses();
+        setVaultStatuses(initialVaultStatuses);
+
         const res = await fetch('/api/config');
         if (res.ok) {
           const data: ProviderServerStatus = await res.json();
@@ -85,12 +118,12 @@ export function SiftChat() {
           const savedProvider =
             (localStorage.getItem('sift_active_provider') as SupportedProvider) ||
             data.defaultProvider ||
-            'openai';
+            'groq';
           const savedModel =
             localStorage.getItem(`sift_model_${savedProvider}`) ||
             data.defaultModels?.[savedProvider] ||
             '';
-          const savedKey = localStorage.getItem(`sift_key_${savedProvider}`) || '';
+          const savedKey = await getProviderKey(savedProvider);
 
           const restoredConfig: ClientProviderConfig = {
             provider: savedProvider,
@@ -100,10 +133,12 @@ export function SiftChat() {
           setProviderConfig(restoredConfig);
 
           // Soft prompt check: if server has NO keys set up AND client has NO key saved, trigger soft prompt
-          const hasAnyClientKey = Boolean(savedKey);
+          const hasAnyVaultKey = Object.values(initialVaultStatuses).some(
+            (v) => v.isConfigured
+          );
           const hasDismissed = sessionStorage.getItem('sift_soft_prompt_dismissed') === 'true';
 
-          if (!data.hasAnyKey && !hasAnyClientKey && !hasDismissed) {
+          if (!data.hasAnyKey && !hasAnyVaultKey && !hasDismissed) {
             setIsSoftPrompt(true);
             setIsSettingsOpen(true);
           }
@@ -114,6 +149,35 @@ export function SiftChat() {
     }
     initConfig();
   }, []);
+
+  const handleQuickSwitchProvider = async (newProv: SupportedProvider) => {
+    try {
+      localStorage.setItem('sift_active_provider', newProv);
+    } catch {}
+
+    const key = await getProviderKey(newProv);
+    const model =
+      localStorage.getItem(`sift_model_${newProv}`) ||
+      serverStatus?.defaultModels?.[newProv] ||
+      '';
+
+    setProviderConfig({
+      provider: newProv,
+      model,
+      apiKey: key || undefined,
+    });
+    setIsProviderMenuOpen(false);
+  };
+
+  const handleSaveProviderConfig = async (newConfig: ClientProviderConfig) => {
+    setProviderConfig(newConfig);
+    try {
+      const refreshedStatuses = await getVaultStatuses();
+      setVaultStatuses(refreshedStatuses);
+    } catch (err) {
+      console.warn('Failed to refresh vault statuses after save:', err);
+    }
+  };
 
   // Fetch conversations list
   const fetchConversations = useCallback(async () => {
@@ -420,6 +484,16 @@ export function SiftChat() {
 
     const clientRequestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
+    // Ensure active provider key is loaded from the encrypted vault if available
+    let effectiveConfig = providerConfig;
+    if (!effectiveConfig.apiKey) {
+      const decryptedKey = await getProviderKey(effectiveConfig.provider);
+      if (decryptedKey) {
+        effectiveConfig = { ...effectiveConfig, apiKey: decryptedKey };
+        setProviderConfig(effectiveConfig);
+      }
+    }
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -431,7 +505,7 @@ export function SiftChat() {
           message: prompt,
           timezone,
           clientRequestId,
-          providerConfig,
+          providerConfig: effectiveConfig,
         }),
       });
 
@@ -643,22 +717,90 @@ export function SiftChat() {
               </button>
             )}
 
-            {/* Model Provider Selector Button */}
-            <button
-              onClick={() => {
-                setIsSoftPrompt(false);
-                setIsSettingsOpen(true);
-              }}
-              className="px-2.5 py-1 text-xs border border-gray-300 hover:border-orange-500 hover:bg-orange-50/50 rounded font-mono text-gray-700 flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-              title="Configure Model Provider & API Key"
-            >
-              <span className="w-1.5 h-1.5 bg-orange-500 rounded-full" />
-              <span className="font-semibold uppercase">{providerConfig.provider}</span>
-              <span className="text-gray-400 hidden lg:inline">
-                ({providerConfig.model || 'select model'})
-              </span>
-              <span className="text-gray-400 text-[10px]">⚙</span>
-            </button>
+            {/* Model Provider Selector & Quick-Switch Dropdown */}
+            <div className="relative" ref={providerMenuRef}>
+              <button
+                onClick={() => setIsProviderMenuOpen(!isProviderMenuOpen)}
+                className="px-2.5 py-1 text-xs border border-gray-300 hover:border-orange-500 hover:bg-orange-50/50 rounded font-mono text-gray-700 flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                title="Select Active Provider or Configure Keys"
+              >
+                <span className="w-1.5 h-1.5 bg-orange-500 rounded-full" />
+                <span className="font-semibold uppercase">{providerConfig.provider}</span>
+                <span className="text-gray-400 hidden lg:inline">
+                  ({providerConfig.model || 'select model'})
+                </span>
+                <span className="text-gray-400 text-[10px]">▼</span>
+              </button>
+
+              {isProviderMenuOpen && (
+                <div className="absolute right-0 mt-1 w-64 bg-white border-2 border-gray-300 rounded shadow-xl py-1 z-50 text-xs font-mono animate-pop-in">
+                  <div className="px-3 py-1.5 border-b border-gray-100 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
+                    Select Active Provider
+                  </div>
+
+                  <div className="max-h-60 overflow-y-auto py-1">
+                    {ALL_SUPPORTED_PROVIDERS.map((prov) => {
+                      const isConfigured = Boolean(
+                        vaultStatuses[prov]?.isConfigured || serverStatus?.providers[prov]
+                      );
+                      const isCurrent = providerConfig.provider === prov;
+                      const fingerprint = vaultStatuses[prov]?.fingerprint;
+
+                      return (
+                        <button
+                          key={prov}
+                          type="button"
+                          onClick={() => handleQuickSwitchProvider(prov)}
+                          className={`w-full px-3 py-2 text-left flex items-center justify-between hover:bg-orange-50 cursor-pointer ${
+                            isCurrent
+                              ? 'bg-orange-50/70 font-bold text-orange-900'
+                              : 'text-gray-800'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`w-2 h-2 rounded-full ${
+                                isConfigured ? 'bg-emerald-500' : 'bg-gray-300'
+                              }`}
+                              title={isConfigured ? 'Key Configured' : 'Not Configured'}
+                            />
+                            <span>{PROVIDER_LABELS[prov]}</span>
+                          </div>
+
+                          <div className="flex items-center gap-1 text-[10px] text-gray-400 font-normal">
+                            {isConfigured ? (
+                              <span className="text-emerald-700 font-mono">
+                                {fingerprint || 'ready'}
+                              </span>
+                            ) : (
+                              <span>no key</span>
+                            )}
+                            {isCurrent && (
+                              <span className="text-orange-600 font-bold ml-1">✓</span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="border-t border-gray-100 pt-1 mt-1 px-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsProviderMenuOpen(false);
+                        setIsSoftPrompt(false);
+                        setIsSettingsOpen(true);
+                      }}
+                      className="w-full text-left px-2.5 py-1.5 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded font-medium flex items-center justify-between cursor-pointer"
+                    >
+                      <span>⚙ Manage Providers & Keys...</span>
+                      <span className="text-[10px] text-gray-400">AES-256</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
 
             <StatusIndicator phase={activePhase} error={error} />
           </div>
@@ -710,7 +852,7 @@ export function SiftChat() {
         onClose={handleCloseModal}
         serverStatus={serverStatus}
         activeConfig={providerConfig}
-        onSaveConfig={(newConfig) => setProviderConfig(newConfig)}
+        onSaveConfig={handleSaveProviderConfig}
         isSoftPrompt={isSoftPrompt}
       />
     </div>

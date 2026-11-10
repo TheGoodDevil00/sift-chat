@@ -54,6 +54,7 @@ flowchart TD
 - [ADR-008: Next.js 16 Turbopack Architecture & Native Engine Isolation](#adr-008-nextjs-16-turbopack-architecture--native-engine-isolation)
 - [ADR-009: Strict URL Canonicalization & Relational Citation Provenance](#adr-009-strict-url-canonicalization--relational-citation-provenance)
 - [ADR-010: Idempotency & Message Deduplication via `client_request_id`](#adr-010-idempotency--message-deduplication-via-client_request_id)
+- [ADR-011: Multi-Provider Encrypted Vault & Anti-Phishing Security Architecture](#adr-011-multi-provider-encrypted-vault--anti-phishing-security-architecture)
 
 ---
 
@@ -210,3 +211,31 @@ flowchart TD
 - **Consequences:**
   - Safe client retries.
   - Zero duplicate turns or orphaned background tasks.
+
+---
+
+### ADR-011: Multi-Provider Encrypted Vault & Anti-Phishing Security Architecture
+
+- **Status:** Accepted & Enforced
+- **Context:**
+  - Users need to configure keys for multiple providers (Groq, OpenAI, Anthropic, Gemini, DeepSeek, xAI, Cohere, OpenRouter) concurrently and switch between them at will without losing or overwriting previously entered credentials.
+  - Client API keys must never be stored in plaintext in the browser or filesystem, must be protected against credential theft, local inspection, and phishing iframes, and must never be leaked through LLM prompts, server logs, or error stack traces.
+- **Decision:**
+  - **Client-Side Authenticated Encryption (AES-GCM-256)**:
+    - Implemented in `src/lib/crypto/vault.ts` using the browser native Web Cryptography API (`window.crypto.subtle`).
+    - Derives a 256-bit AES-GCM key using PBKDF2-HMAC-SHA256 (100,000 iterations) bound to a cryptographically secure 32-byte device installation ID and 16-byte random salt.
+    - Generates a fresh 12-byte cryptographically random IV for every encryption operation, preventing ciphertext frequency analysis and dictionary attacks.
+    - Non-extractable `CryptoKey` prevents in-memory raw key export.
+  - **Independent Multi-Provider Vault**:
+    - Stores credentials independently per provider. Adding, updating, or removing a key for one provider has zero side effects on any other provider's credentials.
+    - Transparently migrates any legacy plaintext `sift_key_*` entries on startup, encrypting them with AES-GCM and immediately purging the plaintext entries from `localStorage`.
+  - **Defense-in-Depth Anti-Phishing & Anti-Exfiltration**:
+    1. *Masked UI & Nonce Fingerprints*: Keys are password-masked with `autoComplete="off"`, `autoCorrect="off"`, and `spellCheck="false"`. UI shows only safe fingerprints (`gsk_••••••••••••3a9b`).
+    2. *Context Isolation (Zero LLM Exposure)*: LLM prompts, tool schemas, and agent context **never** receive API keys. Keys are strictly consumed by the server HTTP transport to authenticate upstream provider REST endpoints.
+    3. *Zero Server Persistence*: Client keys reside strictly in ephemeral memory during request execution. The SQLite database schema has no credentials table or column.
+    4. *Log & Error Scrubbing*: `scrubSensitiveStrings` scrubs API key regex patterns (`sk-...`, `gsk_...`, `AIzaSy...`, `Bearer ...`) from all server logs, error objects, and SSE streams.
+    5. *HTTP Security Headers (`next.config.ts`)*: `X-Frame-Options: DENY` and `frame-ancestors 'none'` prevent phishing via clickjacking or iframe embedding; `X-Content-Type-Options: nosniff` prevents MIME confusion; `Referrer-Policy: strict-origin-when-cross-origin` blocks URL token leakage.
+- **Consequences:**
+  - Users can safely configure all 8 supported providers without losing keys.
+  - Inspecting `localStorage` reveals only AES-256-GCM ciphertext, IVs, and timestamps.
+  - Upstream provider errors never echo raw credentials back to client logs or UI.

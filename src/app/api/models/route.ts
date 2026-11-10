@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { listProviderModels, PROVIDER_FALLBACK_MODELS } from '@/lib/agent/providers/list-models';
 import { getConfig } from '@/lib/config';
+import { scrubSensitiveStrings } from '@/lib/crypto/scrub';
 import type { SupportedProvider } from '@/types/chat';
 
 export const dynamic = 'force-dynamic';
@@ -89,7 +90,8 @@ export async function POST(req: NextRequest) {
       warning: result.warning,
     });
   } catch (err: any) {
-    const message = err.message || err.cause?.message || 'Failed to fetch models from provider';
+    const rawMessage = err.message || err.cause?.message || 'Failed to fetch models from provider';
+    const message = scrubSensitiveStrings(rawMessage);
     console.warn(`[POST /api/models] Provider error: ${message}`);
     return NextResponse.json({ error: message }, { status: 400 });
   }
