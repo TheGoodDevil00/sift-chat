@@ -59,3 +59,7 @@ If today's pricing page lists a different number than the prior conversation, Si
 2. **Deterministic Web Diffing & Snapshot Archival:** Cache raw scraped pricing page text alongside consulted URLs to prove exact historical DOM state rather than relying solely on the assistant's previous textual summary.
 3. **Multi-User Isolation & Auth:** Add session authentication (e.g. Auth.js) with `owner_id` scoping across all tables and rate-limiting tiers.
 4. **Adaptive Context Compaction:** Automatically summarize earlier turns in very long (>50 message) research threads while preserving verbatim excerpts for referenced dates.
+
+---
+
+> For detailed Architectural Decision Records (ADRs) covering concurrency, multi-provider model discovery, and security boundaries, see [ARCHITECTURAL_DECISIONS.md](file:///C:/Dev/sift-minimi-task/ARCHITECTURAL_DECISIONS.md).
