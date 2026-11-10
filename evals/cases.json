@@ -1,0 +1,136 @@
+[
+  {
+    "id": "eval-1-crm-changes",
+    "name": "Journey A: CRM changes since Monday shortlist",
+    "description": "On Monday, shortlisted 5 CRM tools for a 20-person sales team. User asks if any changed pricing or shipped something big since.",
+    "timezone": "Asia/Kolkata",
+    "referenceDate": "2026-11-10T12:00:00.000Z",
+    "historySeed": [
+      {
+        "conversationTitle": "CRM Shortlist for Sales Team",
+        "role": "user",
+        "createdAt": "2026-11-09T05:00:00.000Z",
+        "content": "We need to shortlist 5 CRM tools for our 20-person sales team. Criteria: contact management, pipeline automation, and under $50/user/month."
+      },
+      {
+        "conversationTitle": "CRM Shortlist for Sales Team",
+        "role": "assistant",
+        "createdAt": "2026-11-09T05:02:00.000Z",
+        "content": "Here is the shortlist of 5 CRM tools for your 20-person sales team:\n1. HubSpot Sales Hub Starter: $20/seat/month.\n2. Pipedrive Standard: $24/user/month (annual).\n3. Zoho CRM Standard: $14/user/month.\n4. Close CRM Starter: $49/user/month (annual) or $59 monthly.\n5. Freshsales Growth: $9/user/month.\nAll 5 meet your pipeline automation and budget requirements."
+      }
+    ],
+    "prompt": "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?",
+    "expectedIntent": "change_monitoring",
+    "expectedSearch": true,
+    "expectedHistoryHit": true,
+    "expectedHistoricalEntities": ["HubSpot", "Pipedrive", "Zoho", "Close", "Freshsales"],
+    "passCriteria": [
+      "Exact 5 CRM tools recovered from historical conversation on Monday 9 November",
+      "Model instructed with search required policy for live web verification",
+      "Differentiates pricing changes vs product release announcements",
+      "Does not misreport announced features as shipped without GA confirmation",
+      "Quotes exact dates and cites sources beside claims"
+    ]
+  },
+  {
+    "id": "eval-2-recall-and-recheck",
+    "name": "Journey B: Historical recall plus fact-check (3 November)",
+    "description": "On 3 November, user asked about vector database hosting. User asks what they asked on 3 November and if the answer is still correct today.",
+    "timezone": "UTC",
+    "referenceDate": "2026-11-10T12:00:00.000Z",
+    "historySeed": [
+      {
+        "conversationTitle": "Vector DB Options",
+        "role": "user",
+        "createdAt": "2026-11-03T14:00:00.000Z",
+        "content": "What are the serverless vector databases available with free tiers?"
+      },
+      {
+        "conversationTitle": "Vector DB Options",
+        "role": "assistant",
+        "createdAt": "2026-11-03T14:02:00.000Z",
+        "content": "Pinecone provides a free starter index with up to 100k vectors. Qdrant Cloud offers a free 1GB cluster. Turbopuffer charges usage-based search with an initial credit."
+      }
+    ],
+    "prompt": "What did I ask you on 3 November? Is your answer still correct today?",
+    "expectedIntent": "freshness_check",
+    "expectedSearch": true,
+    "expectedHistoryHit": true,
+    "expectedHistoricalEntities": ["Pinecone", "Qdrant", "Turbopuffer"],
+    "passCriteria": [
+      "Accurately quotes original question from 3 November",
+      "Summarizes original assistant answer accurately",
+      "Searches current sources to verify volatile claims",
+      "Gives per-claim status: still supported, changed/differing, or not verifiable",
+      "Distinguishes answer differences from confirmed effective change dates"
+    ]
+  },
+  {
+    "id": "eval-3-postgres-pricing",
+    "name": "Journey C: Postgres hosting prices since Last Tuesday",
+    "description": "Last Tuesday (Nov 3), discussed Supabase, Neon, and Crunchy Data Postgres hosting plans. User asks if pricing changed since.",
+    "timezone": "America/New_York",
+    "referenceDate": "2026-11-10T12:00:00.000Z",
+    "historySeed": [
+      {
+        "conversationTitle": "Postgres Hosting Comparison",
+        "role": "user",
+        "createdAt": "2026-11-03T15:00:00.000Z",
+        "content": "Compare Neon and Supabase Pro for a dedicated database with 8GB RAM."
+      },
+      {
+        "conversationTitle": "Postgres Hosting Comparison",
+        "role": "assistant",
+        "createdAt": "2026-11-03T15:02:00.000Z",
+        "content": "Supabase Pro is $25/month base including compute credits. Neon Scale is $69/month plus compute unit hours ($0.16/CU-hour). Compute and egress overages apply to both."
+      }
+    ],
+    "prompt": "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since?",
+    "expectedIntent": "change_monitoring",
+    "expectedSearch": true,
+    "expectedHistoryHit": true,
+    "expectedHistoricalEntities": ["Supabase", "Neon"],
+    "passCriteria": [
+      "Resolves Last Tuesday as Tuesday, 3 November 2026 in user timezone",
+      "Recovers exact providers (Supabase, Neon) and baseline plan numbers",
+      "Searches current official pricing pages",
+      "Performs apples-to-apples comparison (compute units, storage, monthly base)",
+      "Marks unknown effective dates explicitly"
+    ]
+  },
+  {
+    "id": "eval-4-no-memory",
+    "name": "Journey D: No memory evidence",
+    "description": "User refers to a shortlist or decision not found in stored history.",
+    "timezone": "UTC",
+    "referenceDate": "2026-11-10T12:00:00.000Z",
+    "historySeed": [],
+    "prompt": "On Monday we shortlisted 5 warehouse management tools. Has any of them changed pricing since?",
+    "expectedIntent": "change_monitoring",
+    "expectedSearch": true,
+    "expectedHistoryHit": false,
+    "expectedHistoricalEntities": [],
+    "passCriteria": [
+      "Honestly acknowledges it could not find that discussion in saved conversations",
+      "Refuses to hallucinate or invent providers that were never discussed",
+      "Asks user for provider names or context rather than guessing"
+    ]
+  },
+  {
+    "id": "eval-5-no-unnecessary-search",
+    "name": "Journey E: Stable conceptual explanation without search",
+    "description": "User asks a stable conceptual database question.",
+    "timezone": "UTC",
+    "referenceDate": "2026-11-10T12:00:00.000Z",
+    "historySeed": [],
+    "prompt": "Explain the difference between a primary key and an index.",
+    "expectedIntent": "general_chat",
+    "expectedSearch": false,
+    "expectedHistoryHit": false,
+    "expectedHistoricalEntities": [],
+    "passCriteria": [
+      "Classifies intent as general_chat with no search required",
+      "Delivers clear direct answer on database concepts without web search latency"
+    ]
+  }
+]

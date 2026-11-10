@@ -1,0 +1,138 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ Monospace typography inspired by chat-rsc
+ ------------------------------------------
+*/
+
+html {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: #fbfbfb;
+  color: #111;
+  min-height: 100vh;
+}
+
+/* Prose overrides matching chat-rsc design */
+.prose {
+  line-height: 1.5;
+}
+
+.prose h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-top: 1.2rem;
+  margin-bottom: 0.8rem;
+}
+
+.prose h2 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-top: 1rem;
+  margin-bottom: 0.6rem;
+}
+
+.prose h3 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-top: 0.8rem;
+  margin-bottom: 0.4rem;
+}
+
+.prose ul {
+  list-style-type: square;
+  padding-inline-start: 1.75ch;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose ol {
+  padding-inline-start: 1.5ch;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose ul > li::marker {
+  color: #f97316; /* orange-500 */
+}
+
+.prose p {
+  margin-top: 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+.prose a {
+  color: #c2410c;
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: #f97316;
+}
+
+.prose a:hover {
+  color: #ea580c;
+  text-decoration-style: double;
+}
+
+.prose hr {
+  margin: 1.2rem 0;
+  border-top: solid 1.5px #ddd;
+}
+
+.prose pre {
+  background-color: #1a1a1a;
+  color: #7f7;
+  padding: 0.75rem;
+  border-radius: 0.375rem;
+  overflow-x: auto;
+  font-size: 0.9em;
+}
+
+.prose code {
+  font-family: inherit;
+  background-color: #f3f4f6;
+  padding: 0.15rem 0.3rem;
+  border-radius: 0.25rem;
+  font-size: 0.9em;
+}
+
+.prose pre code {
+  background-color: transparent;
+  padding: 0;
+}
+
+.prose blockquote {
+  font-style: normal;
+  margin: 1rem 0;
+  padding: 0.5rem 1rem;
+  border-left: 3px solid #f97316;
+  background-color: #fff7ed;
+  border-radius: 0.25rem;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.95em;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid #d1d5db;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.prose th {
+  background-color: #f3f4f6;
+  font-weight: 700;
+}
