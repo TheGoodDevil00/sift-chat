@@ -43,15 +43,14 @@ export function SiftChat() {
   });
 
   // Detect user's local IANA timezone
-  const [timezone, setTimezone] = useState('UTC');
-  useEffect(() => {
+  const [timezone] = useState(() => {
+    if (typeof window === 'undefined') return 'UTC';
     try {
-      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      if (tz) setTimezone(tz);
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     } catch {
-      setTimezone('UTC');
+      return 'UTC';
     }
-  }, []);
+  });
 
   // Fetch server provider & env status on page load
   useEffect(() => {

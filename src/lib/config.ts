@@ -97,7 +97,7 @@ export function getConfig(): AppConfig {
 
   const dbPath = path.isAbsolute(parsed.data.DATABASE_PATH)
     ? parsed.data.DATABASE_PATH
-    : path.resolve(process.cwd(), parsed.data.DATABASE_PATH);
+    : path.resolve(/*turbopackIgnore: true*/ process.cwd(), parsed.data.DATABASE_PATH);
 
   cachedConfig = {
     openaiApiKey: parsed.data.OPENAI_API_KEY.trim(),
