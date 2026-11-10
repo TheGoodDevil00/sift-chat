@@ -8,13 +8,11 @@ import {
 import {
   insertMessage,
   getRecentMessages,
-  insertCitations,
-  insertSources,
 } from '@/lib/db/repositories/messages';
 import { retrieveRelevantHistory } from '@/lib/history/retrieve';
 import { classifyIntent } from '@/lib/agent/intent';
 import { buildAgentInput } from '@/lib/agent/input-builder';
-import { runAgent } from '@/lib/agent/run';
+import { runManager } from '@/lib/agent/run-manager';
 import { randomUUID } from 'crypto';
 import type { ChatEvent } from '@/types/chat';
 
@@ -82,7 +80,7 @@ export async function POST(req: NextRequest) {
     );
 
     // Classify user intent
-    const { intent, requiresSearch } = classifyIntent(
+    const { intent: _intent, requiresSearch } = classifyIntent(
       message,
       historyResult.temporal.hasDate
     );
@@ -100,106 +98,47 @@ export async function POST(req: NextRequest) {
 
     const assistantMessageId = randomUUID();
 
-    // Setup SSE Response
+    // Setup SSE Response stream
     const responseStream = new TransformStream();
     const writer = responseStream.writable.getWriter();
     const encoder = new TextEncoder();
 
-    const sendEvent = async (event: ChatEvent) => {
-      const payload = `data: ${JSON.stringify(event)}\n\n`;
-      await writer.write(encoder.encode(payload));
+    const writeEvent = async (event: ChatEvent) => {
+      try {
+        const payload = `data: ${JSON.stringify(event)}\n\n`;
+        await writer.write(encoder.encode(payload));
+        if (event.type === 'complete' || event.type === 'error') {
+          await writer.close().catch(() => {});
+        }
+      } catch {
+        // Client disconnected (e.g. page refreshed or switched thread)
+        // Background run continues in runManager
+      }
     };
 
-    // Run agent asynchronously in background stream
-    (async () => {
-      try {
-        // Event 1: Start
-        await sendEvent({
-          type: 'start',
-          conversationId: conv.id,
-          userMessageId: userMessage.id,
-        });
+    // Start background run managed by RunManager
+    // This runs completely independently of the HTTP request, surviving page reloads
+    // and allowing users to navigate between threads concurrently.
+    const _run = runManager.startRun({
+      conversationId: conv.id,
+      userMessageId: userMessage.id,
+      assistantMessageId,
+      preparedInput,
+      providerConfig,
+      timezone,
+      initialSubscriber: (event) => {
+        writeEvent(event);
+      },
+    });
 
-        // Event 2: Status retrieving_history
-        await sendEvent({
-          type: 'status',
-          phase: 'retrieving_history',
-        });
-
-        // Run agent with single tool web_search
-        const agentResult = await runAgent(
-          preparedInput,
-          assistantMessageId,
-          {
-            onStatus: async (phase) => {
-              await sendEvent({ type: 'status', phase });
-            },
-            onDelta: async (text) => {
-              await sendEvent({ type: 'delta', text });
-            },
-          },
-          req.signal,
-          providerConfig
-        );
-
-        if (!agentResult.success || !agentResult.normalized) {
-          await sendEvent({
-            type: 'error',
-            code: agentResult.errorCode || 'MODEL_REQUEST_FAILED',
-            message: agentResult.errorMessage || 'Failed to generate agent response.',
-            retryable: agentResult.retryable ?? true,
-          });
-          return;
-        }
-
-        const normalized = agentResult.normalized;
-        const nowIso = new Date().toISOString();
-
-        // Persist assistant message
-        insertMessage({
-          id: assistantMessageId,
-          conversation_id: conv.id,
-          role: 'assistant',
-          content: normalized.text,
-          status: 'complete',
-          model: normalized.model || null,
-          provider_response_id: normalized.responseId || null,
-        });
-
-        // Persist citations
-        const savedCitations = insertCitations(normalized.citations);
-
-        // Persist complete consulted sources list
-        const savedSources = insertSources(normalized.sources);
-
-        // Touch conversation updated_at
-        touchConversation(conv.id);
-
-        // Terminal complete event
-        await sendEvent({
-          type: 'complete',
-          assistantMessageId,
-          citations: savedCitations,
-          sources: savedSources,
-          createdAt: nowIso,
-          timezoneUsed: timezone,
-        });
-      } catch (streamErr: any) {
-        console.error('Streaming error in chat route:', streamErr);
-        await sendEvent({
-          type: 'error',
-          code: 'INTERNAL_ERROR',
-          message: streamErr?.message || 'Internal server error while processing turn.',
-          retryable: true,
-        });
-      } finally {
-        await writer.close().catch(() => {});
-      }
-    })();
+    // When client disconnects or aborts the HTTP request, clean up only the listener
+    req.signal.addEventListener('abort', () => {
+      writer.close().catch(() => {});
+    });
 
     return new Response(responseStream.readable, {
       headers: {
-        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
       },
@@ -207,7 +146,7 @@ export async function POST(req: NextRequest) {
   } catch (err: any) {
     console.error('Fatal error in POST /api/chat:', err);
     return NextResponse.json(
-      { error: err?.message || 'Internal server error', code: 'INTERNAL_ERROR' },
+      { error: 'An unexpected internal error occurred', code: 'INTERNAL_ERROR' },
       { status: 500 }
     );
   }

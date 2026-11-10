@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConversation, deleteConversation } from '@/lib/db/repositories/conversations';
 import { getConversationMessagesWithMeta } from '@/lib/db/repositories/messages';
+import { runManager } from '@/lib/agent/run-manager';
 
 export async function GET(
   _req: NextRequest,
@@ -18,12 +19,22 @@ export async function GET(
     }
 
     const messages = getConversationMessagesWithMeta(id);
+    const activeRun = runManager.getRun(id);
 
     return NextResponse.json({
       conversation: {
         ...conversation,
         messages,
       },
+      activeRun:
+        activeRun && activeRun.status === 'running'
+          ? {
+              runId: activeRun.runId,
+              phase: activeRun.phase,
+              accumulatedText: activeRun.accumulatedText,
+              startedAt: activeRun.startedAt,
+            }
+          : null,
     });
   } catch (err: any) {
     console.error('Failed to get conversation:', err);
@@ -40,6 +51,10 @@ export async function DELETE(
 ) {
   try {
     const { id } = await context.params;
+
+    // Cancel any active background run for this thread first
+    runManager.cancelRun(id);
+
     const deleted = deleteConversation(id, false);
 
     if (!deleted) {

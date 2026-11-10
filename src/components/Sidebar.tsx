@@ -6,6 +6,7 @@ import type { ConversationSummary } from '@/types/chat';
 interface SidebarProps {
   conversations: ConversationSummary[];
   activeConversationId: string | null;
+  activeRuns?: Record<string, { phase: string | null }>;
   onSelectConversation: (id: string) => void;
   onNewChat: () => void;
   onDeleteConversation: (id: string) => void;
@@ -16,6 +17,7 @@ interface SidebarProps {
 export function Sidebar({
   conversations,
   activeConversationId,
+  activeRuns,
   onSelectConversation,
   onNewChat,
   onDeleteConversation,
@@ -75,6 +77,9 @@ export function Sidebar({
           ) : (
             conversations.map((conv) => {
               const isActive = conv.id === activeConversationId;
+              const isRunning = Boolean(activeRuns && activeRuns[conv.id]);
+              const runPhase = activeRuns?.[conv.id]?.phase;
+
               let dateStr = '';
               try {
                 const d = new Date(conv.updatedAt || conv.createdAt);
@@ -101,10 +106,19 @@ export function Sidebar({
                 >
                   <div className="flex-1 truncate pr-2">
                     <div className="truncate">{conv.title || 'Untitled Session'}</div>
-                    {dateStr && (
-                      <div className="text-[10px] text-gray-400 font-normal">
-                        {dateStr}
+                    {isRunning ? (
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
+                        <span className="text-[10px] text-orange-600 font-semibold tracking-wide uppercase">
+                          {runPhase ? runPhase.replace('_', ' ') : 'generating'}...
+                        </span>
                       </div>
+                    ) : (
+                      dateStr && (
+                        <div className="text-[10px] text-gray-400 font-normal">
+                          {dateStr}
+                        </div>
+                      )
                     )}
                   </div>
                   <button

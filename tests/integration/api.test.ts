@@ -10,6 +10,9 @@ import {
   DELETE as deleteConversationHandler,
 } from '@/app/api/conversations/[id]/route';
 import { POST as modelsHandler } from '@/app/api/models/route';
+import { GET as getRunsHandler } from '@/app/api/runs/route';
+import { GET as getStreamHandler } from '@/app/api/chat/stream/route';
+import { POST as cancelChatHandler } from '@/app/api/chat/cancel/route';
 import { NextRequest } from 'next/server';
 
 describe('API Routes Integration', () => {
@@ -101,5 +104,29 @@ describe('API Routes Integration', () => {
     } finally {
       global.fetch = originalFetch;
     }
+  });
+
+  it('lists active runs via GET /api/runs', async () => {
+    const res = await getRunsHandler();
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.activeRuns).toBeDefined();
+  });
+
+  it('handles stream reconnection via GET /api/chat/stream for inactive run', async () => {
+    const req = new NextRequest('http://localhost:3000/api/chat/stream?conversationId=non-existent');
+    const res = await getStreamHandler(req);
+    expect(res.status).toBe(404);
+  });
+
+  it('cancels chat task via POST /api/chat/cancel', async () => {
+    const req = new NextRequest('http://localhost:3000/api/chat/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: 'test-cancel-id' }),
+    });
+    const res = await cancelChatHandler(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.success).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type {
   ConversationSummary,
   MessageWithMeta,
@@ -33,6 +33,26 @@ export function SiftChat() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // Multi-thread concurrent active runs state (conversationId -> run status)
+  const [activeRuns, setActiveRuns] = useState<
+    Record<string, { phase: ChatPhase | null; status?: string }>
+  >({});
+
+  // Active HTTP stream readers map (conversationId -> AbortController)
+  const activeStreamsRef = useRef<Map<string, AbortController>>(new Map());
+
+  // Refs for access inside asynchronous stream loops
+  const activeConversationIdRef = useRef<string | null>(null);
+  const activePhaseRef = useRef<ChatPhase | null>(null);
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    activePhaseRef.current = activePhase;
+  }, [activePhase]);
+
   // Multi-provider configuration state
   const [serverStatus, setServerStatus] = useState<ProviderServerStatus | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -62,8 +82,14 @@ export function SiftChat() {
           setServerStatus(data);
 
           // Restore stored preferences from browser localStorage
-          const savedProvider = (localStorage.getItem('sift_active_provider') as SupportedProvider) || data.defaultProvider || 'openai';
-          const savedModel = localStorage.getItem(`sift_model_${savedProvider}`) || data.defaultModels?.[savedProvider] || '';
+          const savedProvider =
+            (localStorage.getItem('sift_active_provider') as SupportedProvider) ||
+            data.defaultProvider ||
+            'openai';
+          const savedModel =
+            localStorage.getItem(`sift_model_${savedProvider}`) ||
+            data.defaultModels?.[savedProvider] ||
+            '';
           const savedKey = localStorage.getItem(`sift_key_${savedProvider}`) || '';
 
           const restoredConfig: ClientProviderConfig = {
@@ -106,38 +132,254 @@ export function SiftChat() {
     fetchConversations();
   }, [fetchConversations]);
 
-  // Load a conversation's messages
-  const loadConversation = useCallback(async (id: string) => {
+  // Poll server for active runs across all threads
+  const pollActiveRuns = useCallback(async () => {
     try {
-      setError(null);
-      const res = await fetch(`/api/conversations/${id}`);
+      const res = await fetch('/api/runs');
       if (res.ok) {
         const data = await res.json();
-        setActiveConversationId(id);
-        setMessages(data.conversation.messages || []);
-      } else {
-        setError('Could not load historical conversation.');
+        const serverRuns = data.activeRuns || {};
+        setActiveRuns((prev) => {
+          // Merge server runs with local active streams
+          const merged: Record<string, { phase: ChatPhase | null; status?: string }> = {};
+          for (const [id, r] of Object.entries(serverRuns) as [string, any][]) {
+            merged[id] = { phase: r.phase, status: r.status };
+          }
+          for (const [id] of activeStreamsRef.current.entries()) {
+            if (!merged[id]) {
+              merged[id] = prev[id] || { phase: 'writing', status: 'running' };
+            }
+          }
+          return merged;
+        });
       }
     } catch (err) {
-      console.error('Failed to load conversation details:', err);
-      setError('Network error loading conversation.');
+      console.warn('Could not poll active runs:', err);
     }
   }, []);
 
+  useEffect(() => {
+    pollActiveRuns();
+    const interval = setInterval(pollActiveRuns, 3500);
+    return () => clearInterval(interval);
+  }, [pollActiveRuns]);
+
+  // Connect to an ongoing background SSE stream for a thread
+  const connectToThreadStream = useCallback(
+    async (convId: string, initialAccumulated = '', initialPrompt?: string) => {
+      // Avoid duplicate readers for the same conversation
+      if (activeStreamsRef.current.has(convId)) return;
+
+      const controller = new AbortController();
+      activeStreamsRef.current.set(convId, controller);
+
+      setActiveRuns((prev) => ({
+        ...prev,
+        [convId]: { phase: 'retrieving_history', status: 'running' },
+      }));
+
+      try {
+        const res = await fetch(`/api/chat/stream?conversationId=${convId}`, {
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          activeStreamsRef.current.delete(convId);
+          setActiveRuns((prev) => {
+            const next = { ...prev };
+            delete next[convId];
+            return next;
+          });
+          return;
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) return;
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let accumulatedContent = initialAccumulated;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+            try {
+              const event: ChatEvent = JSON.parse(trimmed.slice(6));
+
+              if (event.type === 'status') {
+                setActiveRuns((prev) => ({
+                  ...prev,
+                  [convId]: { phase: event.phase, status: 'running' },
+                }));
+
+                if (activeConversationIdRef.current === convId) {
+                  setActivePhase(event.phase);
+                  setStreamingMessage((prev) =>
+                    prev
+                      ? { ...prev, phase: event.phase }
+                      : { content: accumulatedContent, phase: event.phase }
+                  );
+                }
+              } else if (event.type === 'delta') {
+                accumulatedContent += event.text;
+
+                if (activeConversationIdRef.current === convId) {
+                  setStreamingMessage({
+                    content: accumulatedContent,
+                    phase: activePhaseRef.current || 'writing',
+                  });
+                }
+              } else if (event.type === 'complete') {
+                activeStreamsRef.current.delete(convId);
+                setActiveRuns((prev) => {
+                  const next = { ...prev };
+                  delete next[convId];
+                  return next;
+                });
+
+                if (activeConversationIdRef.current === convId) {
+                  const finalAssistantMsg: MessageWithMeta = {
+                    id: event.assistantMessageId,
+                    conversation_id: convId,
+                    role: 'assistant',
+                    content: accumulatedContent,
+                    created_at: event.createdAt,
+                    status: 'complete',
+                    citations: event.citations || [],
+                    sources: event.sources || [],
+                  };
+
+                  setMessages((prev) => [...prev, finalAssistantMsg]);
+                  setStreamingMessage(null);
+                  setActivePhase(null);
+                  setIsGenerating(false);
+                }
+                fetchConversations();
+              } else if (event.type === 'error') {
+                activeStreamsRef.current.delete(convId);
+                setActiveRuns((prev) => {
+                  const next = { ...prev };
+                  delete next[convId];
+                  return next;
+                });
+
+                if (activeConversationIdRef.current === convId) {
+                  setError(event.message);
+                  if (initialPrompt) setLastFailedPrompt(initialPrompt);
+                  setStreamingMessage(null);
+                  setActivePhase(null);
+                  setIsGenerating(false);
+                }
+              }
+            } catch (pErr) {
+              console.warn('Failed to parse SSE line:', trimmed, pErr);
+            }
+          }
+        }
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.error('Stream connection error for thread:', convId, err);
+        }
+      } finally {
+        activeStreamsRef.current.delete(convId);
+        setActiveRuns((prev) => {
+          const next = { ...prev };
+          delete next[convId];
+          return next;
+        });
+        if (activeConversationIdRef.current === convId) {
+          setIsGenerating(false);
+        }
+      }
+    },
+    [fetchConversations]
+  );
+
+  // Load a conversation's messages and reconnect to its active task if running
+  const loadConversation = useCallback(
+    async (id: string) => {
+      try {
+        localStorage.setItem('sift_active_conversation_id', id);
+        setActiveConversationId(id);
+        setError(null);
+
+        const res = await fetch(`/api/conversations/${id}`);
+        if (res.ok) {
+          const data = await res.json();
+          setMessages(data.conversation.messages || []);
+
+          if (data.activeRun) {
+            // Thread is actively generating on the server! Reconnect smoothly.
+            setIsGenerating(true);
+            setActivePhase(data.activeRun.phase);
+            setStreamingMessage({
+              content: data.activeRun.accumulatedText || '',
+              phase: data.activeRun.phase,
+            });
+
+            if (!activeStreamsRef.current.has(id)) {
+              connectToThreadStream(id, data.activeRun.accumulatedText || '');
+            }
+          } else {
+            // Not running on server
+            if (!activeStreamsRef.current.has(id)) {
+              setIsGenerating(false);
+              setActivePhase(null);
+              setStreamingMessage(null);
+            }
+          }
+        } else {
+          setError('Could not load historical conversation.');
+        }
+      } catch (err) {
+        console.error('Failed to load conversation details:', err);
+        setError('Network error loading conversation.');
+      }
+    },
+    [connectToThreadStream]
+  );
+
+  // Restore previous active conversation on page mount/reload
+  useEffect(() => {
+    const savedId = localStorage.getItem('sift_active_conversation_id');
+    if (savedId && !activeConversationId) {
+      loadConversation(savedId);
+    }
+  }, [loadConversation, activeConversationId]);
+
   // Start new chat
   const handleNewChat = useCallback(() => {
+    try {
+      localStorage.removeItem('sift_active_conversation_id');
+    } catch {}
     setActiveConversationId(null);
     setMessages([]);
     setStreamingMessage(null);
     setActivePhase(null);
     setError(null);
     setLastFailedPrompt(null);
+    setIsGenerating(false);
   }, []);
 
   // Delete conversation
   const handleDeleteConversation = useCallback(
     async (id: string) => {
       try {
+        // Abort active stream if any
+        if (activeStreamsRef.current.has(id)) {
+          activeStreamsRef.current.get(id)?.abort();
+          activeStreamsRef.current.delete(id);
+        }
+
         const res = await fetch(`/api/conversations/${id}`, { method: 'DELETE' });
         if (res.ok) {
           setConversations((prev) => prev.filter((c) => c.id !== id));
@@ -206,6 +448,7 @@ export function SiftChat() {
       const decoder = new TextDecoder();
       let buffer = '';
       let accumulatedContent = '';
+      let currentConvId = activeConversationId;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -224,38 +467,75 @@ export function SiftChat() {
             const event: ChatEvent = JSON.parse(jsonStr);
 
             if (event.type === 'start') {
+              currentConvId = event.conversationId;
+              localStorage.setItem('sift_active_conversation_id', event.conversationId);
               setActiveConversationId(event.conversationId);
+              setActiveRuns((prev) => ({
+                ...prev,
+                [event.conversationId]: { phase: 'retrieving_history', status: 'running' },
+              }));
             } else if (event.type === 'status') {
-              setActivePhase(event.phase);
-              setStreamingMessage((prev) =>
-                prev ? { ...prev, phase: event.phase } : null
-              );
+              if (currentConvId) {
+                setActiveRuns((prev) => ({
+                  ...prev,
+                  [currentConvId!]: { phase: event.phase, status: 'running' },
+                }));
+              }
+              if (activeConversationIdRef.current === currentConvId) {
+                setActivePhase(event.phase);
+                setStreamingMessage((prev) =>
+                  prev ? { ...prev, phase: event.phase } : null
+                );
+              }
             } else if (event.type === 'delta') {
               accumulatedContent += event.text;
-              setStreamingMessage((prev) =>
-                prev ? { ...prev, content: accumulatedContent } : null
-              );
+              if (activeConversationIdRef.current === currentConvId) {
+                setStreamingMessage((prev) =>
+                  prev ? { ...prev, content: accumulatedContent } : null
+                );
+              }
             } else if (event.type === 'complete') {
-              const finalAssistantMsg: MessageWithMeta = {
-                id: event.assistantMessageId,
-                conversation_id: activeConversationId || '',
-                role: 'assistant',
-                content: accumulatedContent,
-                created_at: event.createdAt,
-                status: 'complete',
-                citations: event.citations || [],
-                sources: event.sources || [],
-              };
+              if (currentConvId) {
+                setActiveRuns((prev) => {
+                  const next = { ...prev };
+                  delete next[currentConvId!];
+                  return next;
+                });
+              }
 
-              setMessages((prev) => [...prev, finalAssistantMsg]);
-              setStreamingMessage(null);
-              setActivePhase(null);
+              if (activeConversationIdRef.current === currentConvId) {
+                const finalAssistantMsg: MessageWithMeta = {
+                  id: event.assistantMessageId,
+                  conversation_id: currentConvId || '',
+                  role: 'assistant',
+                  content: accumulatedContent,
+                  created_at: event.createdAt,
+                  status: 'complete',
+                  citations: event.citations || [],
+                  sources: event.sources || [],
+                };
+
+                setMessages((prev) => [...prev, finalAssistantMsg]);
+                setStreamingMessage(null);
+                setActivePhase(null);
+                setIsGenerating(false);
+              }
               fetchConversations();
             } else if (event.type === 'error') {
-              setError(event.message);
-              setLastFailedPrompt(prompt);
-              setStreamingMessage(null);
-              setActivePhase(null);
+              if (currentConvId) {
+                setActiveRuns((prev) => {
+                  const next = { ...prev };
+                  delete next[currentConvId!];
+                  return next;
+                });
+              }
+              if (activeConversationIdRef.current === currentConvId) {
+                setError(event.message);
+                setLastFailedPrompt(prompt);
+                setStreamingMessage(null);
+                setActivePhase(null);
+                setIsGenerating(false);
+              }
             }
           } catch (pErr) {
             console.warn('Failed to parse SSE line:', trimmed, pErr);
@@ -268,9 +548,38 @@ export function SiftChat() {
       setLastFailedPrompt(prompt);
       setStreamingMessage(null);
       setActivePhase(null);
-    } finally {
       setIsGenerating(false);
     }
+  };
+
+  // Stop / Cancel active generation
+  const handleStopGenerating = async () => {
+    if (!activeConversationId) return;
+
+    try {
+      await fetch('/api/chat/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversationId: activeConversationId }),
+      });
+    } catch (err) {
+      console.warn('Failed to cancel run:', err);
+    }
+
+    if (activeStreamsRef.current.has(activeConversationId)) {
+      activeStreamsRef.current.get(activeConversationId)?.abort();
+      activeStreamsRef.current.delete(activeConversationId);
+    }
+
+    setActiveRuns((prev) => {
+      const next = { ...prev };
+      delete next[activeConversationId];
+      return next;
+    });
+
+    setIsGenerating(false);
+    setActivePhase(null);
+    setStreamingMessage(null);
   };
 
   const handleRetry = () => {
@@ -290,10 +599,11 @@ export function SiftChat() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#fbfbfb]">
-      {/* Sidebar with conversation history */}
+      {/* Sidebar with conversation history and active background run badges */}
       <Sidebar
         conversations={conversations}
         activeConversationId={activeConversationId}
+        activeRuns={activeRuns}
         onSelectConversation={loadConversation}
         onNewChat={handleNewChat}
         onDeleteConversation={handleDeleteConversation}
@@ -322,6 +632,17 @@ export function SiftChat() {
           </div>
 
           <div className="flex items-center gap-3">
+            {isGenerating && (
+              <button
+                onClick={handleStopGenerating}
+                className="px-2.5 py-1 text-xs border border-red-300 hover:bg-red-50 text-red-600 rounded font-mono font-medium cursor-pointer flex items-center gap-1 shadow-2xs"
+                title="Stop current generation"
+              >
+                <span>⏹</span>
+                <span>Stop</span>
+              </button>
+            )}
+
             {/* Model Provider Selector Button */}
             <button
               onClick={() => {
