@@ -60,7 +60,25 @@ export const PROVIDER_FALLBACK_MODELS: Record<SupportedProvider, ProviderModelIt
   openrouter: [
     { id: 'anthropic/claude-3.5-sonnet', name: 'Anthropic: Claude 3.5 Sonnet' },
     { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Meta: Llama 3.3 70B Instruct' },
+    { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Meta: Llama 3.3 70B Instruct (Free)' },
+    { id: 'google/gemini-2.0-flash-lite-preview-02-05:free', name: 'Gemini 2.0 Flash Lite (Free)' },
+    { id: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1 (Free)' },
     { id: 'deepseek/deepseek-chat', name: 'DeepSeek: DeepSeek Chat' },
+    { id: 'qwen/qwen-2.5-coder-32b-instruct:free', name: 'Qwen 2.5 Coder 32B (Free)' },
+  ],
+  ollama: [
+    { id: 'llama3.2', name: 'llama3.2 (Meta Llama 3.2 3B)' },
+    { id: 'llama3.3', name: 'llama3.3 (Meta Llama 3.3 70B)' },
+    { id: 'deepseek-r1:8b', name: 'deepseek-r1:8b (DeepSeek R1 Distill)' },
+    { id: 'qwen2.5-coder:7b', name: 'qwen2.5-coder:7b' },
+    { id: 'mistral', name: 'mistral:7b' },
+    { id: 'phi4', name: 'phi4 (Microsoft 14B)' },
+  ],
+  local: [
+    { id: 'local-model', name: 'Currently Loaded Model (LM Studio / Local)' },
+    { id: 'llama-3.2-3b-instruct', name: 'llama-3.2-3b-instruct' },
+    { id: 'mistral-7b-instruct', name: 'mistral-7b-instruct' },
+    { id: 'deepseek-r1-distill-qwen-7b', name: 'deepseek-r1-distill-qwen-7b' },
   ],
 };
 
@@ -75,7 +93,8 @@ export async function listProviderModels(
   customBaseUrl?: string
 ): Promise<ListModelsResult> {
   const trimmedKey = apiKey.trim();
-  if (!trimmedKey) {
+  const isLocalProvider = provider === 'ollama' || provider === 'local';
+  if (!trimmedKey && !isLocalProvider && provider !== 'openrouter') {
     throw new Error(`API key is required to fetch models for ${provider}.`);
   }
 
@@ -108,6 +127,12 @@ export async function listProviderModels(
         break;
       case 'openrouter':
         result = await fetchOpenRouterModels(trimmedKey, controller.signal);
+        break;
+      case 'ollama':
+        result = await fetchOllamaModels(customBaseUrl, controller.signal);
+        break;
+      case 'local':
+        result = await fetchLocalModels(customBaseUrl, controller.signal);
         break;
       default:
         throw new Error(`Unsupported provider: ${provider}`);
@@ -478,14 +503,30 @@ async function fetchOpenRouterModels(
   apiKey: string,
   signal: AbortSignal
 ): Promise<ListModelsResult> {
-  const res = await fetch('https://openrouter.ai/api/v1/models', {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'HTTP-Referer': 'https://sift.local',
+    'X-Title': 'Sift Research Agent',
+  };
+  if (apiKey && apiKey.trim()) {
+    headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+  }
+
+  let res = await fetch('https://openrouter.ai/api/v1/models', {
     method: 'GET',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     signal,
   });
+
+  // If 401 occurred (e.g. key expired or invalid), retry without key since /models is public
+  if (res.status === 401 && headers['Authorization']) {
+    delete headers['Authorization'];
+    res = await fetch('https://openrouter.ai/api/v1/models', {
+      method: 'GET',
+      headers,
+      signal,
+    });
+  }
 
   if (!res.ok) {
     const errorText = await res.text();
@@ -508,4 +549,106 @@ async function fetchOpenRouterModels(
   }));
 
   return { provider: 'openrouter', models, live: true };
+}
+
+// ---------------------------------------------------------------------------
+// Ollama (Local Server)
+// ---------------------------------------------------------------------------
+async function fetchOllamaModels(
+  customBaseUrl?: string,
+  signal?: AbortSignal
+): Promise<ListModelsResult> {
+  const rawBase = customBaseUrl || 'http://localhost:11434';
+  const effectiveBase = rawBase.replace(/\/v1\/?$/, '');
+
+  // 1. Try standard OpenAI-compatible /v1/models endpoint
+  try {
+    const res = await fetch(`${effectiveBase}/v1/models`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      signal,
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const data: any[] = json.data || [];
+      const models: ProviderModelItem[] = data.map((m) => ({
+        id: m.id,
+        name: m.id,
+      }));
+      if (models.length > 0) {
+        return { provider: 'ollama', models, live: true };
+      }
+    }
+  } catch {}
+
+  // 2. Fallback to native Ollama /api/tags endpoint
+  const res = await fetch(`${effectiveBase}/api/tags`, {
+    method: 'GET',
+    signal,
+  });
+
+  if (!res.ok) {
+    throw new Error(`Ollama returned status ${res.status} from ${effectiveBase}/api/tags`);
+  }
+
+  const json = await res.json();
+  const rawModels: any[] = json.models || [];
+  const models: ProviderModelItem[] = rawModels.map((m) => {
+    const sizeGb = m.size ? `${Math.round((m.size / (1024 * 1024 * 1024)) * 10) / 10}GB` : '';
+    return {
+      id: m.name || m.model,
+      name: sizeGb ? `${m.name || m.model} (${sizeGb})` : (m.name || m.model),
+    };
+  });
+
+  if (models.length === 0) {
+    return {
+      provider: 'ollama',
+      models: PROVIDER_FALLBACK_MODELS.ollama,
+      live: false,
+      warning: 'Ollama is running, but no models have been pulled yet. Run "ollama pull llama3.2".',
+    };
+  }
+
+  return { provider: 'ollama', models, live: true };
+}
+
+// ---------------------------------------------------------------------------
+// Local / LM Studio / vLLM / LocalAI
+// ---------------------------------------------------------------------------
+async function fetchLocalModels(
+  customBaseUrl?: string,
+  signal?: AbortSignal
+): Promise<ListModelsResult> {
+  const rawBase = customBaseUrl || 'http://localhost:1234/v1';
+  const effectiveBase = rawBase.replace(/\/$/, '');
+  const url = effectiveBase.endsWith('/models') ? effectiveBase : `${effectiveBase}/models`;
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    signal,
+  });
+
+  if (!res.ok) {
+    throw new Error(`Local model server returned status ${res.status} from ${url}`);
+  }
+
+  const json = await res.json();
+  const data: any[] = json.data || [];
+  const models: ProviderModelItem[] = data.map((m) => ({
+    id: m.id,
+    name: m.id,
+  }));
+
+  if (models.length === 0) {
+    return {
+      provider: 'local',
+      models: PROVIDER_FALLBACK_MODELS.local,
+      live: false,
+      warning: 'Local server is connected, but no model is currently loaded in memory.',
+    };
+  }
+
+  return { provider: 'local', models, live: true };
 }

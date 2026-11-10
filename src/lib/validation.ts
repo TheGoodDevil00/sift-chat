@@ -22,7 +22,18 @@ const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 
 export const ClientProviderConfigSchema = z.object({
   provider: z
-    .enum(['openai', 'anthropic', 'gemini', 'deepseek', 'xai', 'cohere', 'groq', 'openrouter'])
+    .enum([
+      'openai',
+      'anthropic',
+      'gemini',
+      'deepseek',
+      'xai',
+      'cohere',
+      'groq',
+      'openrouter',
+      'ollama',
+      'local',
+    ])
     .default('openai'),
   model: z.string().optional(),
   apiKey: z.string().optional(),

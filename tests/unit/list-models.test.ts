@@ -113,4 +113,58 @@ describe('listProviderModels', () => {
     expect(result.models.length).toBeGreaterThan(0);
     expect(result.models.some((m) => m.id.includes('llama'))).toBe(true);
   });
+
+  it('fetches OpenRouter models with proper routing headers', async () => {
+    global.fetch = vi.fn().mockImplementation((url, init) => {
+      expect(init.headers['HTTP-Referer']).toBe('https://sift.local');
+      expect(init.headers['X-Title']).toBe('Sift Research Agent');
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          data: [
+            { id: 'anthropic/claude-3.5-sonnet', name: 'Anthropic: Claude 3.5 Sonnet' },
+            { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B (free)' },
+          ],
+        }),
+      } as any);
+    });
+
+    const result = await listProviderModels('openrouter', 'sk-or-v1-test');
+    expect(result.provider).toBe('openrouter');
+    expect(result.models.length).toBe(2);
+    expect(result.models[0].id).toBe('anthropic/claude-3.5-sonnet');
+    expect(result.models[1].id).toBe('meta-llama/llama-3.3-70b-instruct:free');
+  });
+
+  it('fetches Ollama local models without requiring an API key', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        models: [
+          { name: 'llama3.2:latest', size: 2000000000 },
+          { name: 'deepseek-r1:8b', size: 4900000000 },
+        ],
+      }),
+    } as any);
+
+    const result = await listProviderModels('ollama', '');
+    expect(result.provider).toBe('ollama');
+    expect(result.models.length).toBe(2);
+    expect(result.models[0].id).toBe('llama3.2:latest');
+    expect(result.models[1].id).toBe('deepseek-r1:8b');
+  });
+
+  it('fetches Local / LM Studio models without requiring an API key', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [{ id: 'qwen2.5-7b-instruct' }, { id: 'mistral-7b-instruct-v0.3' }],
+      }),
+    } as any);
+
+    const result = await listProviderModels('local', '', 'http://localhost:1234/v1');
+    expect(result.provider).toBe('local');
+    expect(result.models.length).toBe(2);
+    expect(result.models[0].id).toBe('qwen2.5-7b-instruct');
+  });
 });

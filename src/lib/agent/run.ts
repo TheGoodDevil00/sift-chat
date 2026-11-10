@@ -61,6 +61,13 @@ export async function runAgent(
     else if (provider === 'cohere') apiKey = config.cohereApiKey;
     else if (provider === 'openrouter') apiKey = config.openrouterApiKey;
     else if (provider === 'groq') apiKey = config.groqApiKey;
+    else if (provider === 'ollama') apiKey = 'ollama';
+    else if (provider === 'local') apiKey = 'local';
+  }
+
+  // Local models do not require a real API key
+  if (!apiKey && (provider === 'ollama' || provider === 'local')) {
+    apiKey = provider;
   }
 
   if (!apiKey) {
@@ -81,8 +88,10 @@ export async function runAgent(
     else if (provider === 'deepseek') model = config.deepseekModel;
     else if (provider === 'xai') model = config.xaiModel;
     else if (provider === 'cohere') model = config.cohereModel;
-    else if (provider === 'openrouter') model = config.openrouterModel;
+    else if (provider === 'openrouter') model = config.openrouterModel || 'anthropic/claude-3.5-sonnet';
     else if (provider === 'groq') model = config.groqModel;
+    else if (provider === 'ollama') model = 'llama3.2';
+    else if (provider === 'local') model = 'local-model';
   }
 
   // If still no model specified, dynamically query the provider's /models endpoint to get actual available model
@@ -116,7 +125,7 @@ export async function runAgent(
   } else if (provider === 'cohere') {
     return runCohereToolLoop(apiKey, model!, fullInstructions, prepared, assistantMessageId, callbacks, signal);
   } else {
-    // OpenAI, DeepSeek, xAI, Groq, OpenRouter use the standard tool calling loop
+    // OpenAI, DeepSeek, xAI, Groq, OpenRouter, Ollama, Local use the standard tool calling loop
     let baseUrl = providerConfig?.customBaseUrl;
     let label = 'OpenAI';
     if (provider === 'deepseek') {
@@ -131,6 +140,12 @@ export async function runAgent(
     } else if (provider === 'openrouter') {
       baseUrl = baseUrl || 'https://openrouter.ai/api/v1';
       label = 'OpenRouter';
+    } else if (provider === 'ollama') {
+      baseUrl = baseUrl || 'http://localhost:11434/v1';
+      label = 'Ollama';
+    } else if (provider === 'local') {
+      baseUrl = baseUrl || 'http://localhost:1234/v1';
+      label = 'Local Model';
     }
 
     return runOpenAIToolLoop(apiKey, baseUrl, model!, fullInstructions, prepared, assistantMessageId, label, callbacks, signal);
@@ -138,7 +153,7 @@ export async function runAgent(
 }
 
 // ---------------------------------------------------------------------------
-// Unified Tool Loop: OpenAI, DeepSeek, xAI, Groq, OpenRouter
+// Unified Tool Loop: OpenAI, DeepSeek, xAI, Groq, OpenRouter, Ollama, Local
 // ---------------------------------------------------------------------------
 async function runOpenAIToolLoop(
   apiKey: string,
@@ -151,10 +166,17 @@ async function runOpenAIToolLoop(
   callbacks?: AgentRunCallbacks,
   signal?: AbortSignal
 ): Promise<AgentRunResult> {
+  const defaultHeaders: Record<string, string> = {};
+  if (providerLabel === 'OpenRouter') {
+    defaultHeaders['HTTP-Referer'] = 'https://sift.local';
+    defaultHeaders['X-Title'] = 'Sift Research Agent';
+  }
+
   const client = new OpenAI({
-    apiKey,
+    apiKey: apiKey || 'dummy-key',
     baseURL,
     timeout: 60000,
+    defaultHeaders: Object.keys(defaultHeaders).length > 0 ? defaultHeaders : undefined,
   });
 
   const allEvidence: SearchEvidence[] = [];
@@ -182,16 +204,19 @@ async function runOpenAIToolLoop(
       if (signal?.aborted) throw new Error('AbortError');
 
       // Invoke LLM
-      const response = await client.chat.completions.create(
-        {
-          model,
-          messages,
-          tools,
-          tool_choice: 'auto',
-          stream: false,
-        },
-        { signal }
-      );
+      const requestPayload: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
+        model,
+        messages,
+        tools,
+        stream: false,
+      };
+
+      // Ollama does not support the tool_choice property in /v1/chat/completions
+      if (providerLabel !== 'Ollama') {
+        requestPayload.tool_choice = 'auto';
+      }
+
+      const response = await client.chat.completions.create(requestPayload, { signal });
 
       const choice = response.choices?.[0];
       const message = choice?.message;
@@ -643,13 +668,23 @@ function handleProviderError(err: any, providerLabel: string, signal?: AbortSign
   }
 
   const status = err?.status || err?.statusCode;
-  const msg = err?.message || `An error occurred while contacting ${providerLabel}.`;
+  const rawMsg = err?.message || err?.error?.message || `An error occurred while contacting ${providerLabel}.`;
+  const msg = scrubSensitiveStrings(rawMsg);
 
-  if (status === 401 || msg.includes('API key') || msg.includes('authentication') || msg.includes('unauthorized')) {
+  if (status === 401 || status === 403 || msg.includes('authentication') || msg.includes('unauthorized') || msg.includes('User not found')) {
     return {
       success: false,
-      errorCode: 'MISSING_API_KEY',
-      errorMessage: `Invalid or missing API key for ${providerLabel}. Please check your credentials in Provider Settings.`,
+      errorCode: 'AUTHENTICATION_FAILED',
+      errorMessage: `${providerLabel} authentication failed (${status || 401}): ${msg}. Please check your ${providerLabel} key in Provider Settings.`,
+      retryable: false,
+    };
+  }
+
+  if (status === 402 || msg.includes('credits') || msg.includes('payment') || msg.includes('quota')) {
+    return {
+      success: false,
+      errorCode: 'PAYMENT_REQUIRED',
+      errorMessage: `${providerLabel} payment error (402): ${msg}. Your account has insufficient credits. Please add credits or select a free model.`,
       retryable: false,
     };
   }
@@ -658,15 +693,26 @@ function handleProviderError(err: any, providerLabel: string, signal?: AbortSign
     return {
       success: false,
       errorCode: 'RATE_LIMITED',
-      errorMessage: `${providerLabel} rate limit exceeded. Please wait a moment and retry.`,
+      errorMessage: `${providerLabel} rate limit exceeded: ${msg}. Please wait a moment and retry.`,
       retryable: true,
     };
+  }
+
+  if (msg.includes('fetch failed') || msg.includes('ECONNREFUSED') || msg.includes('Connect Timeout')) {
+    if (providerLabel === 'Ollama' || providerLabel === 'Local Model') {
+      return {
+        success: false,
+        errorCode: 'LOCAL_SERVER_UNREACHABLE',
+        errorMessage: `Could not connect to ${providerLabel} server (${msg}). Ensure your local server is running (e.g. 'ollama serve' or LM Studio local server).`,
+        retryable: true,
+      };
+    }
   }
 
   return {
     success: false,
     errorCode: 'MODEL_REQUEST_FAILED',
-    errorMessage: `${providerLabel} request failed: ${scrubSensitiveStrings(msg)}`,
+    errorMessage: `${providerLabel} request failed: ${msg}`,
     retryable: true,
   };
 }

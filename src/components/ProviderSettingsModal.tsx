@@ -44,6 +44,8 @@ export const ALL_SUPPORTED_PROVIDERS: SupportedProvider[] = [
   'xai',
   'cohere',
   'openrouter',
+  'ollama',
+  'local',
 ];
 
 export const PROVIDER_LABELS: Record<SupportedProvider, string> = {
@@ -55,6 +57,8 @@ export const PROVIDER_LABELS: Record<SupportedProvider, string> = {
   xai: 'xAI (Grok)',
   cohere: 'Cohere',
   openrouter: 'OpenRouter',
+  ollama: 'Ollama (Local)',
+  local: 'LM Studio / Local (vLLM)',
 };
 
 export const PROVIDER_DESCRIPTIONS: Record<SupportedProvider, string> = {
@@ -65,7 +69,9 @@ export const PROVIDER_DESCRIPTIONS: Record<SupportedProvider, string> = {
   deepseek: 'DeepSeek V3 and R1 reasoning',
   xai: 'Grok 2 and Grok Beta models',
   cohere: 'Command R+ and Command R',
-  openrouter: 'Universal multi-provider gateway',
+  openrouter: 'Universal multi-provider gateway & free models',
+  ollama: 'Run open-weight models locally on your machine (http://localhost:11434)',
+  local: 'OpenAI-compatible local server (LM Studio, vLLM, LocalAI)',
 };
 
 export function ProviderSettingsModal({
@@ -91,6 +97,7 @@ export function ProviderSettingsModal({
 
   const [pendingKeys, setPendingKeys] = useState<Partial<Record<SupportedProvider, string>>>({});
   const [pendingModels, setPendingModels] = useState<Partial<Record<SupportedProvider, string>>>({});
+  const [pendingUrls, setPendingUrls] = useState<Partial<Record<SupportedProvider, string>>>({});
   const [showKeyMap, setShowKeyMap] = useState<Partial<Record<SupportedProvider, boolean>>>({});
 
   // Model discovery states
@@ -118,13 +125,20 @@ export function ProviderSettingsModal({
 
   // Fetch live models directly from provider /models endpoint
   const fetchLiveModels = useCallback(
-    async (prov: SupportedProvider, explicitKey?: string) => {
+    async (prov: SupportedProvider, explicitKey?: string, explicitUrl?: string) => {
       const trimmedKey = explicitKey !== undefined ? explicitKey.trim() : (pendingKeys[prov] || '').trim();
       const hasDecrypted = await getProviderKey(prov);
       const effectiveKey = trimmedKey || hasDecrypted || '';
       const hasServerKey = serverStatus?.providers[prov] ?? false;
+      const isLocal = prov === 'ollama' || prov === 'local';
+      const isOpenRouter = prov === 'openrouter';
 
-      if (!effectiveKey && !hasServerKey) {
+      const customUrl =
+        explicitUrl !== undefined
+          ? explicitUrl.trim()
+          : (pendingUrls[prov] || (typeof window !== 'undefined' ? localStorage.getItem(`sift_base_url_${prov}`) : null) || undefined);
+
+      if (!effectiveKey && !hasServerKey && !isLocal && !isOpenRouter) {
         setModelsByProvider((prev) => ({ ...prev, [prov]: [] }));
         setFetchError(null);
         setWarning(null);
@@ -142,6 +156,7 @@ export function ProviderSettingsModal({
           body: JSON.stringify({
             provider: prov,
             apiKey: effectiveKey || undefined,
+            customBaseUrl: customUrl || undefined,
           }),
         });
 
@@ -174,7 +189,7 @@ export function ProviderSettingsModal({
         setIsLoadingModels(false);
       }
     },
-    [pendingKeys, serverStatus]
+    [pendingKeys, pendingUrls, serverStatus]
   );
 
   // Initialize modal state on open
@@ -187,6 +202,7 @@ export function ProviderSettingsModal({
 
     // Load stored models for all providers from localStorage
     const initialModels: Partial<Record<SupportedProvider, string>> = {};
+    const initialUrls: Partial<Record<SupportedProvider, string>> = {};
     for (const p of ALL_SUPPORTED_PROVIDERS) {
       try {
         const stored = localStorage.getItem(`sift_model_${p}`);
@@ -195,9 +211,19 @@ export function ProviderSettingsModal({
         } else if (p === activeConfig.provider && activeConfig.model) {
           initialModels[p] = activeConfig.model;
         }
+
+        const storedUrl = localStorage.getItem(`sift_base_url_${p}`);
+        if (storedUrl) {
+          initialUrls[p] = storedUrl;
+        } else if (p === 'ollama') {
+          initialUrls[p] = 'http://localhost:11434/v1';
+        } else if (p === 'local') {
+          initialUrls[p] = 'http://localhost:1234/v1';
+        }
       } catch {}
     }
     setPendingModels(initialModels);
+    setPendingUrls(initialUrls);
 
     refreshVault().then(() => {
       fetchLiveModels(initialProv);
@@ -271,11 +297,19 @@ export function ProviderSettingsModal({
         }
       }
 
-      // 2. Persist model selections
+      // 2. Persist model selections and custom base URLs
       for (const [prov, modelVal] of Object.entries(pendingModels) as [SupportedProvider, string][]) {
         if (modelVal && modelVal.trim()) {
           try {
             localStorage.setItem(`sift_model_${prov}`, modelVal.trim());
+          } catch {}
+        }
+      }
+
+      for (const [prov, urlVal] of Object.entries(pendingUrls) as [SupportedProvider, string][]) {
+        if (urlVal && urlVal.trim()) {
+          try {
+            localStorage.setItem(`sift_base_url_${prov}`, urlVal.trim());
           } catch {}
         }
       }
@@ -292,10 +326,20 @@ export function ProviderSettingsModal({
         serverStatus?.defaultModels?.[activeProvider] ||
         '';
 
+      const activeCustomBaseUrl =
+        pendingUrls[activeProvider]?.trim() ||
+        (typeof window !== 'undefined' ? localStorage.getItem(`sift_base_url_${activeProvider}`) : null) ||
+        (activeProvider === 'ollama'
+          ? 'http://localhost:11434/v1'
+          : activeProvider === 'local'
+          ? 'http://localhost:1234/v1'
+          : undefined);
+
       onSaveConfig({
         provider: activeProvider,
         model: activeModel,
         apiKey: activeDecryptedKey || undefined,
+        customBaseUrl: activeCustomBaseUrl,
       });
 
       onClose();
@@ -418,11 +462,71 @@ export function ProviderSettingsModal({
               )}
             </div>
 
+            {/* Local Server Endpoint URL (Ollama / Local Models) */}
+            {(selectedProvider === 'ollama' || selectedProvider === 'local') && (
+              <div className="p-3 bg-gray-50 border border-gray-200 rounded">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold uppercase text-gray-700">
+                    Local Endpoint URL:
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => fetchLiveModels(selectedProvider)}
+                    className="text-[11px] text-blue-600 hover:text-blue-800 font-semibold cursor-pointer"
+                  >
+                    Test Connection
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={
+                    pendingUrls[selectedProvider] ??
+                    (selectedProvider === 'ollama' ? 'http://localhost:11434/v1' : 'http://localhost:1234/v1')
+                  }
+                  onChange={(e) =>
+                    setPendingUrls((prev) => ({
+                      ...prev,
+                      [selectedProvider]: e.target.value,
+                    }))
+                  }
+                  placeholder={
+                    selectedProvider === 'ollama'
+                      ? 'http://localhost:11434/v1'
+                      : 'http://localhost:1234/v1'
+                  }
+                  className="w-full p-2 border-2 border-gray-300 rounded focus:border-orange-500 focus:outline-none font-mono text-sm bg-white"
+                />
+                <div className="text-[11px] text-gray-500 mt-1 font-sans">
+                  {selectedProvider === 'ollama'
+                    ? 'Default is http://localhost:11434/v1. Make sure "ollama serve" is running.'
+                    : 'Default is http://localhost:1234/v1 for LM Studio, or http://localhost:8000/v1 for vLLM.'}
+                </div>
+              </div>
+            )}
+
+            {/* OpenRouter Free Models Notice */}
+            {selectedProvider === 'openrouter' && (
+              <div className="p-2.5 bg-blue-50 border border-blue-200 rounded text-blue-900 text-xs font-sans leading-relaxed">
+                💡 <strong>OpenRouter Notice:</strong> If your account has zero credits, you can use free models ending in <code>:free</code> (e.g.{' '}
+                <code className="bg-white/80 px-1 py-0.5 rounded border border-blue-200">
+                  meta-llama/llama-3.3-70b-instruct:free
+                </code>{' '}
+                or{' '}
+                <code className="bg-white/80 px-1 py-0.5 rounded border border-blue-200">
+                  google/gemini-2.0-flash-lite-preview-02-05:free
+                </code>
+                ) with 0 balance. Paid models require adding credits on openrouter.ai.
+              </div>
+            )}
+
             {/* API Key Input Section */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="text-xs font-semibold uppercase text-gray-700">
-                  {PROVIDER_LABELS[selectedProvider]} API Key:
+                  {PROVIDER_LABELS[selectedProvider]} API Key
+                  {selectedProvider === 'ollama' || selectedProvider === 'local'
+                    ? ' (Optional for local server):'
+                    : ':'}
                 </label>
                 <div className="flex items-center gap-3">
                   {currentKeyInput && (
@@ -452,7 +556,7 @@ export function ProviderSettingsModal({
                   <button
                     type="button"
                     onClick={() => fetchLiveModels(selectedProvider)}
-                    disabled={isLoadingModels || (!isKeyConfigured && !currentKeyInput)}
+                    disabled={isLoadingModels}
                     className="text-[11px] text-blue-600 hover:text-blue-800 font-semibold cursor-pointer disabled:opacity-50"
                   >
                     {isLoadingModels ? 'Fetching...' : '↻ Refresh Models'}
@@ -469,7 +573,9 @@ export function ProviderSettingsModal({
                   value={currentKeyInput}
                   onChange={(e) => handleKeyChange(selectedProvider, e.target.value)}
                   placeholder={
-                    currentProviderStatus?.isConfigured
+                    selectedProvider === 'ollama' || selectedProvider === 'local'
+                      ? 'Leave blank for local server (defaults to dummy key)'
+                      : currentProviderStatus?.isConfigured
                       ? `Encrypted in browser (${currentProviderStatus.fingerprint}) — enter new key to replace`
                       : hasServerKey
                       ? 'Server environment key active (enter key to override)'
@@ -481,7 +587,14 @@ export function ProviderSettingsModal({
 
               {/* Security & Encryption Status Badges */}
               <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
-                {currentProviderStatus?.isConfigured && !currentKeyInput ? (
+                {selectedProvider === 'ollama' || selectedProvider === 'local' ? (
+                  <span className="text-emerald-700 flex items-center gap-1 font-sans">
+                    <span>💻</span>
+                    <span>
+                      Runs entirely on your local machine. No external API key required.
+                    </span>
+                  </span>
+                ) : currentProviderStatus?.isConfigured && !currentKeyInput ? (
                   <span className="text-emerald-700 flex items-center gap-1 font-sans">
                     <span>🔒</span>
                     <span>

@@ -17,6 +17,8 @@ const RequestSchema = z.object({
     'cohere',
     'groq',
     'openrouter',
+    'ollama',
+    'local',
   ]),
   apiKey: z.string().optional(),
   customBaseUrl: z.string().url().optional(),
@@ -64,10 +66,21 @@ export async function POST(req: NextRequest) {
         case 'openrouter':
           resolvedKey = serverConfig.openrouterApiKey;
           break;
+        case 'ollama':
+          resolvedKey = 'ollama';
+          break;
+        case 'local':
+          resolvedKey = 'local';
+          break;
       }
     }
 
-    if (!resolvedKey) {
+    // Local providers do not require an API key
+    if (!resolvedKey && (provider === 'ollama' || provider === 'local')) {
+      resolvedKey = provider;
+    }
+
+    if (!resolvedKey && provider !== 'openrouter') {
       return NextResponse.json(
         {
           error: `No API key found for ${provider}. Please enter your ${provider} API key to fetch models.`,

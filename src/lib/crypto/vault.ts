@@ -281,6 +281,8 @@ export async function getVaultStatuses(): Promise<
     'xai',
     'cohere',
     'openrouter',
+    'ollama',
+    'local',
   ];
 
   const statuses = {} as Record<SupportedProvider, ProviderKeyStatus>;
@@ -320,6 +322,8 @@ export async function migrateLegacyPlaintextKeys(): Promise<void> {
     'xai',
     'cohere',
     'openrouter',
+    'ollama',
+    'local',
   ];
 
   for (const prov of allProviders) {

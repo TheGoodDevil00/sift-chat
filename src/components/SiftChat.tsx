@@ -124,11 +124,23 @@ export function SiftChat() {
             data.defaultModels?.[savedProvider] ||
             '';
           const savedKey = await getProviderKey(savedProvider);
+          const savedBaseUrl =
+            localStorage.getItem(`sift_base_url_${savedProvider}`) ||
+            (savedProvider === 'ollama'
+              ? 'http://localhost:11434/v1'
+              : savedProvider === 'local'
+              ? 'http://localhost:1234/v1'
+              : undefined);
 
           const restoredConfig: ClientProviderConfig = {
             provider: savedProvider,
             model: savedModel,
-            apiKey: savedKey || undefined,
+            apiKey:
+              savedKey ||
+              (savedProvider === 'ollama' || savedProvider === 'local'
+                ? savedProvider
+                : undefined),
+            customBaseUrl: savedBaseUrl,
           };
           setProviderConfig(restoredConfig);
 
@@ -159,12 +171,23 @@ export function SiftChat() {
     const model =
       localStorage.getItem(`sift_model_${newProv}`) ||
       serverStatus?.defaultModels?.[newProv] ||
-      '';
+      (newProv === 'ollama' ? 'llama3.2' : newProv === 'local' ? 'local-model' : '');
+
+    const customBaseUrl =
+      localStorage.getItem(`sift_base_url_${newProv}`) ||
+      (newProv === 'ollama'
+        ? 'http://localhost:11434/v1'
+        : newProv === 'local'
+        ? 'http://localhost:1234/v1'
+        : undefined);
 
     setProviderConfig({
       provider: newProv,
       model,
-      apiKey: key || undefined,
+      apiKey:
+        key ||
+        (newProv === 'ollama' || newProv === 'local' ? newProv : undefined),
+      customBaseUrl,
     });
     setIsProviderMenuOpen(false);
   };
@@ -740,11 +763,12 @@ export function SiftChat() {
 
                   <div className="max-h-60 overflow-y-auto py-1">
                     {ALL_SUPPORTED_PROVIDERS.map((prov) => {
+                      const isLocal = prov === 'ollama' || prov === 'local';
                       const isConfigured = Boolean(
-                        vaultStatuses[prov]?.isConfigured || serverStatus?.providers[prov]
+                        isLocal || vaultStatuses[prov]?.isConfigured || serverStatus?.providers[prov]
                       );
                       const isCurrent = providerConfig.provider === prov;
-                      const fingerprint = vaultStatuses[prov]?.fingerprint;
+                      const fingerprint = isLocal ? 'localhost' : vaultStatuses[prov]?.fingerprint;
 
                       return (
                         <button

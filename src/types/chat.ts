@@ -70,7 +70,9 @@ export type SupportedProvider =
   | 'xai'
   | 'cohere'
   | 'groq'
-  | 'openrouter';
+  | 'openrouter'
+  | 'ollama'
+  | 'local';
 
 export interface ClientProviderConfig {
   provider: SupportedProvider;

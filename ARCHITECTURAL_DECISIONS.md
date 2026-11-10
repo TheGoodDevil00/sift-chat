@@ -55,6 +55,7 @@ flowchart TD
 - [ADR-009: Strict URL Canonicalization & Relational Citation Provenance](#adr-009-strict-url-canonicalization--relational-citation-provenance)
 - [ADR-010: Idempotency & Message Deduplication via `client_request_id`](#adr-010-idempotency--message-deduplication-via-client_request_id)
 - [ADR-011: Multi-Provider Encrypted Vault & Anti-Phishing Security Architecture](#adr-011-multi-provider-encrypted-vault--anti-phishing-security-architecture)
+- [ADR-012: OpenRouter Integration & Local Model Runtimes (Ollama & LM Studio/vLLM)](#adr-012-openrouter-integration--local-model-runtimes-ollama--lm-studiovllm)
 
 ---
 
@@ -239,3 +240,26 @@ flowchart TD
   - Users can safely configure all 8 supported providers without losing keys.
   - Inspecting `localStorage` reveals only AES-256-GCM ciphertext, IVs, and timestamps.
   - Upstream provider errors never echo raw credentials back to client logs or UI.
+
+---
+
+### ADR-012: OpenRouter Integration & Local Model Runtimes (Ollama & LM Studio/vLLM)
+
+- **Status:** Accepted & Enforced
+- **Context:**
+  - OpenRouter requests can fail when routing headers (`HTTP-Referer`, `X-Title`) are missing or when accounts have zero credits, producing confusing 401/402 authentication and payment errors.
+  - Users increasingly run local open-weight models (Llama 3.3, DeepSeek R1, Qwen 2.5, Mistral) on their own machines via **Ollama** or **LM Studio / vLLM / LocalAI** for private, zero-cost, air-gapped research.
+- **Decision:**
+  - **OpenRouter Protocol Fix**:
+    - Pass mandatory `defaultHeaders: { 'HTTP-Referer': 'https://sift.local', 'X-Title': 'Sift Research Agent' }` in `runOpenAIToolLoop`.
+    - Differentiate between 401 (Authentication Failed) and 402 (Insufficient Credits / Payment Required).
+    - Expose curated free models (`meta-llama/llama-3.3-70b-instruct:free`, `google/gemini-2.0-flash-lite-preview-02-05:free`, `deepseek/deepseek-r1:free`, etc.) to run with 0 credit balance.
+    - Fall back to public catalog listing without auth headers when `/api/v1/models` receives a 401 on an unprovisioned or expired key.
+  - **First-Class Local Models (`ollama` & `local`)**:
+    - **Ollama**: Connects directly to `http://localhost:11434/v1` (with automatic fallback to native `/api/tags` for live model inventory). Supports tool calling without sending unsupported `tool_choice: 'auto'`.
+    - **Local (LM Studio / vLLM / LocalAI)**: Connects to configurable OpenAI-compatible endpoints (default `http://localhost:1234/v1`).
+    - **Zero-Key Requirement**: Local providers do not require an API key and default to a safe dummy key in the OpenAI client.
+    - **Configurable Endpoints**: Endpoint base URLs are persisted per provider (`sift_base_url_ollama`, `sift_base_url_local`).
+- **Consequences:**
+  - Users can run Sift against cloud providers (Groq, Anthropic, OpenAI, etc.), universal aggregators (OpenRouter), or fully local private models (Ollama, LM Studio).
+  - OpenRouter users get actionable diagnostic error messages and zero-cost free model access.
