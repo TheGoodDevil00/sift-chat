@@ -6,52 +6,62 @@ Sift is a research assistant for questions whose answers depend on both **what w
 
 Built for the **minimi hiring challenge**, Sift operates under a strict architecture: **the model is equipped with exactly one tool: live web search**. Context retrieval, calendar calculations, and citation tracking are deterministic application responsibilities.
 
+Diagrams of the request lifecycle, retrieval decision tree, search cascade, security boundaries, and data model live in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ---
 
 ## Key Features
 
 1. **Deterministic Temporal Memory:**
-   Resolves conversational references like *"last Tuesday"*, *"on 3 November"*, or *"since Monday"* using `chrono-node` and the user's browser IANA timezone, calculating exact UTC day boundaries without guessing.
-2. **Hybrid History Retrieval:**
-   Combines calendar-range queries with SQLite FTS5 BM25 full-text keyword search across prior conversation turns.
-3. **Multi-Provider & Latest 2026 Models:**
-   First-class support across 8 major providers:
-   - **OpenAI**: `gpt-6-astra` (default), `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` (Responses API with built-in search)
-   - **Anthropic**: `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`
-   - **Google Gemini**: `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` (native Google Search grounding)
-   - **DeepSeek**: `deepseek-flash` (V4.1 Flash), `deepseek-v4-pro`, `deepseek-chat`, `deepseek-reasoner` (`api.deepseek.com`)
-   - **xAI (Grok)**: `grok-4.7`, `grok-4.7-latest`, `grok-3` (`api.x.ai/v1`)
-   - **Cohere**: `command-a-plus-05-2026`, `command-a-03-2025`, `command-r7b-12-2024` (`cohere-ai` v2)
+   Resolves conversational references like *"last Tuesday"*, *"on 3 November"*, *"since Monday"*, *"last week"*, and *"in the last two weeks"* using `chrono-node` plus explicit interval rules and the user's browser IANA timezone, calculating exact UTC boundaries without guessing. Calendar phrases (`last week`) and rolling windows (`last two weeks`) are deliberately different.
+2. **Relevance-First History Retrieval:**
+   Combines calendar day-boundary queries with SQLite FTS5 BM25 topic search. The relevance floor is scoped to the resolved date window: unrelated chatter is filtered, but the day the user named is never deleted just because its wording differs from the query. Packed into a hard context token budget (<=1200 tokens).
+3. **Background Runs, Reconnect, and Cancel:**
+   A turn runs in a server-side run manager, so navigating away or reloading does not kill it. `GET /api/chat/stream` replays buffered events and continues the live stream; `GET /api/runs` lists active work for the sidebar; `POST /api/chat/cancel` aborts it. Only one run per conversation is allowed.
+4. **Multi-Provider Architecture & Live Model Discovery:**
+   Supports major providers with live `/models` discovery and function-calling web search:
+   - **OpenAI**: `gpt-4o` (default), `gpt-4o-mini`, `o1`, `o3-mini` (Chat Completions tool calling + reasoning effort support)
+   - **Anthropic**: `claude-3-5-sonnet-latest`, `claude-3-5-haiku-latest`, `claude-3-opus-latest`
+   - **Google Gemini**: `gemini-2.0-flash`, `gemini-1.5-pro` (function declaration tool calling)
    - **Groq**: `llama-3.3-70b-versatile`, `mixtral-8x7b-32768`
-   - **OpenRouter**: multi-model gateway (`openai/gpt-5.6-sol`, `anthropic/claude-sonnet-5-5`, etc.)
-4. **Client-Side Key Privacy & Soft Prompt:**
+   - **DeepSeek**: `deepseek-chat`, `deepseek-reasoner`
+   - **xAI (Grok)**: `grok-2-latest`, `grok-beta`
+   - **Cohere**: `command-r-plus`, `command-r`
+   - **Ollama / Local**: `llama3.2`, `mistral`, etc. (tested with strict 4096 context budget)
+   - **OpenRouter**: multi-model gateway with free and paid tiers
+5. **Keyless-Ready Search Cascade:**
+   Exa neural search → Firecrawl deep DOM extraction → Tavily → DuckDuckGo HTML keyless fallback. Search works without search-provider keys; you still need one model provider (cloud key or a local Ollama/LM Studio endpoint).
+6. **Client-Side Key Privacy & Soft Prompt:**
    - Detects whether any keys are configured in the server environment on page load.
    - If no keys exist, displays a non-intrusive soft prompt allowing instant provider and key selection in the dashboard.
-   - Keys configured in the dashboard are saved **strictly client-side in browser `localStorage`** and used only in-memory per request turn. They are never saved to server disk, database, or logs.
-5. **Freshness & Change Verification:**
+   - Keys configured in the dashboard are encrypted in browser storage (AES-GCM) and used only in-memory per request turn. They are never saved to server disk, database, or logs.
+7. **Freshness & Change Verification:**
    Differentiates confirmed vendor changes, differences from earlier assistant answers, and "no change found" (without claiming the absence of evidence proves no change occurred).
-6. **Clickable Provenance & Citations:**
+8. **Clickable Provenance & Citations:**
    Preserves inline annotations and stores the complete ledger of consulted source URLs for every assistant turn.
+9. **Enforced Search Policy:**
+   The intent classifier does more than add prompt text. When a turn is classified as volatile, the runner refuses to return a model-memory answer: it gives the model one corrective turn to call `web_search`, and if the model still refuses, it returns an explicit verification failure instead of a confident stale answer.
+10. **Strict Citation Grounding:**
+   Inline citation URLs are accepted only when they match a URL the agent actually retrieved during that turn. Plausible-looking URLs invented by the model, or a different page on a consulted domain, are dropped rather than rendered as evidence.
 
 ---
 
 ## Architecture Overview
 
+```text
+POST /api/chat
+  1. Validate request (Zod, IANA timezone)
+  2. Check clientRequestId idempotency, persist the user turn (SQLite WAL)
+  3. Resolve the date reference into timezone-correct UTC bounds
+  4. Retrieve history (date bounds + FTS5 BM25, window-scoped relevance floor)
+  5. Classify intent and decide whether search is mandatory
+  6. Assemble a bounded prompt (untrusted historical quotes + runtime context)
+  7. Run the model with exactly one tool, web_search, enforcing search policy
+  8. Ground citations against evidence actually retrieved this turn
+  9. Persist the assistant turn, sources, and citations; stream over SSE
 ```
-Client (Next.js / chat-rsc Monospace UI)
-      │  LocalStorage: Client Keys (Optional)
-      ▼  POST /api/chat { conversationId, message, timezone, clientRequestId, providerConfig }
-API Route (/api/chat)
-  ├── 1. Request Validation (Zod, IANA timezone verification)
-  ├── 2. Persistence & Idempotency Key Check (SQLite WAL)
-  ├── 3. Temporal Resolution (chrono-node + timezone day boundaries)
-  ├── 4. History Retrieval (SQLite date bounds + FTS5 BM25 search)
-  ├── 5. Intent Classifier (Determines search policy: required vs no-search)
-  ├── 6. Bounded Prompt Assembly (Untrusted historical quotes + runtime context)
-  ├── 7. Multi-Provider Agent Runtime (OpenAI, Anthropic, Gemini, DeepSeek, xAI, Cohere, Groq, OpenRouter)
-  ├── 8. Citation & Source Normalization (Deduplication, scheme sanitation)
-  └── 9. SSE Streaming (start, status, delta, complete, error)
-```
+
+Full diagrams: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -78,9 +88,12 @@ You can provide keys in `.env` OR configure them directly in the browser UI at r
 cp .env.example .env
 ```
 
+The file is authoritative; the short version:
+
 ```dotenv
-# Configure any of your preferred providers:
+# Model provider: at least one of these (or a local Ollama / LM Studio endpoint)
 OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o
 ANTHROPIC_API_KEY=
 GEMINI_API_KEY=
 DEEPSEEK_API_KEY=
@@ -89,10 +102,15 @@ COHERE_API_KEY=
 GROQ_API_KEY=
 OPENROUTER_API_KEY=
 
+# Optional search providers; the agent falls back to a keyless DuckDuckGo path
+EXA_API_KEY=
+FIRECRAWL_API_KEY=
+TAVILY_API_KEY=
+
 DATABASE_PATH=./data/sift.sqlite
 ```
 
-> **Client-Side Dashboard Keys:** When you open Sift, if no keys are in `.env`, a soft prompt appears where you can select your provider and enter your API key. Keys entered in the UI are stored strictly in `localStorage` on your machine.
+> **Dashboard keys:** If no server key is configured, a soft prompt lets you pick a provider and paste a key in the browser. Keys are encrypted at rest with AES-GCM-256 in `localStorage` and sent only for the request that uses them — never written to the server database or logs.
 
 ### 3. Run Development Server
 
@@ -104,17 +122,43 @@ Open [http://localhost:3000](http://localhost:3000) or [http://localhost:3000/ch
 
 ---
 
+## Security & Correctness Invariants
+
+- **Server keys never go to a client-chosen endpoint.** A custom base URL requires the caller to supply its own provider key. This is checked before the server resolves any `.env` key.
+- **Endpoint validation:** remote custom endpoints must use HTTPS and may not target loopback, private, link-local, or metadata addresses. Local providers (`ollama`, `local`) may only use a loopback endpoint.
+- **Search is enforced, not requested.** See feature 9 above.
+- **Citations are grounded, not merely well-formed.** See feature 10 above.
+- **Outbound fetches are restricted to public hosts.** Search results and deep-scrape URLs must be HTTP(S) and resolve to a non-loopback, non-private, non-link-local host; redirects are followed manually and each hop is validated, so a public URL cannot bounce the server to an internal address.
+- **Idempotent retries:** duplicate `clientRequestId` submissions replay the stored assistant reply (or attach to the still-running background run) instead of starting a second model call.
+- **Hidden reasoning is not a product surface.** Model reasoning tokens may influence the answer, but they are not streamed to the browser or stored in the database.
+
+---
+
 ## Commands
 
 | Command | Description |
 |---|---|
 | `npm run dev` | Start development server on port 3000 |
-| `npm test` | Run complete unit and integration test suite via Vitest |
-| `npm run eval` | Run the challenge evaluation runner on core scenarios |
+| `npm test` | Run the hermetic unit and integration test suite via Vitest |
+| `npm run eval` | Run the deterministic memory/intent evaluation cases |
+| `npm run eval:e2e` | Run live agent-output evals (requires `OPENAI_API_KEY`) |
 | `npm run typecheck` | Run TypeScript type checking (`tsc --noEmit`) |
 | `npm run lint` | Run ESLint check |
 | `npm run build` | Build optimized production bundle |
 | `npm start` | Start production server |
+
+Live provider tests are opt-in: set `RUN_LIVE_TESTS=1` for the live search test and `OLLAMA_LIVE=1` (plus a running Ollama instance) for the local-model test.
+
+---
+
+## Known Limitations
+
+- Retrieval is lexical (FTS5 + date bounds), not embedding-based. It is fast and deterministic; when a named date window shares no vocabulary with the query, the whole window is returned and confidence is reported as `medium` rather than pretending a lexical match exists.
+- Active runs live in the server process. A restart loses in-flight generations, though persisted turns and citations are unaffected.
+- The verification report is model-produced and validated structurally (status vocabulary, HTTP(S) sources, table escaping), not fact-checked by a second model in the request path.
+- The app is single-user with no authentication or multi-tenant isolation. It is built to run locally, not as a public multi-tenant service.
+- Deep scraping is best-effort: a page that blocks fetches or returns only client-rendered HTML may yield a thinner excerpt, and search snippets remain the fallback.
+- The live E2E judge is a smoke test for answer quality; the deterministic suite primarily tests memory, intent, grounding, idempotency, and security invariants.
 
 ---
 
