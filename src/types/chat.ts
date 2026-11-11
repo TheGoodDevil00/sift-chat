@@ -16,6 +16,7 @@ export interface Message {
   conversation_id: string;
   role: MessageRole;
   content: string;
+  thinking?: string | null;
   created_at: string;
   status: MessageStatus;
   client_request_id?: string | null;
@@ -79,6 +80,11 @@ export interface ClientProviderConfig {
   model: string;
   apiKey?: string;
   customBaseUrl?: string;
+  searchKeys?: {
+    exa?: string;
+    firecrawl?: string;
+    tavily?: string;
+  };
 }
 
 export interface ChatRequest {
@@ -89,12 +95,13 @@ export interface ChatRequest {
   providerConfig?: ClientProviderConfig;
 }
 
-export type ChatPhase = 'retrieving_history' | 'searching_web' | 'writing';
+export type ChatPhase = 'retrieving_history' | 'searching_web' | 'thinking' | 'writing';
 
 export type ChatEvent =
   | { type: 'start'; conversationId: string; userMessageId: string }
   | { type: 'status'; phase: ChatPhase }
   | { type: 'delta'; text: string }
+  | { type: 'thinking'; text: string }
   | {
       type: 'complete';
       assistantMessageId: string;
@@ -102,6 +109,8 @@ export type ChatEvent =
       sources: Source[];
       createdAt: string;
       timezoneUsed: string;
+      thinking?: string | null;
+      text?: string;
     }
   | { type: 'error'; code: string; message: string; retryable: boolean };
 
@@ -121,6 +130,8 @@ export interface TemporalResolution {
   resolvedDisplay: string | null;
   confidence: 'exact' | 'approximate' | 'none';
   timezone: string;
+  isInterval?: boolean;
+  hasDeltaQuery?: boolean;
 }
 
 export interface HistoryExcerpt {

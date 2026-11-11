@@ -3,6 +3,7 @@ import { normalizeCitations, normalizeSources } from '../citations/normalize';
 
 export interface NormalizedAgentResponse {
   text: string;
+  thinking?: string;
   citations: Array<{
     message_id: string;
     url: string;

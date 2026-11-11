@@ -38,6 +38,13 @@ export const ClientProviderConfigSchema = z.object({
   model: z.string().optional(),
   apiKey: z.string().optional(),
   customBaseUrl: z.string().optional(),
+  searchKeys: z
+    .object({
+      exa: z.string().optional(),
+      firecrawl: z.string().optional(),
+      tavily: z.string().optional(),
+    })
+    .optional(),
 });
 
 export const ChatRequestSchema = z.object({
@@ -92,6 +99,13 @@ export function validateChatRequest(body: unknown): {
             model: result.data.providerConfig.model || '',
             apiKey: result.data.providerConfig.apiKey?.trim(),
             customBaseUrl: result.data.providerConfig.customBaseUrl?.trim(),
+            searchKeys: result.data.providerConfig.searchKeys
+              ? {
+                  exa: result.data.providerConfig.searchKeys.exa?.trim() || undefined,
+                  firecrawl: result.data.providerConfig.searchKeys.firecrawl?.trim() || undefined,
+                  tavily: result.data.providerConfig.searchKeys.tavily?.trim() || undefined,
+                }
+              : undefined,
           }
         : undefined,
     },

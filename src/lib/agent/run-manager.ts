@@ -9,6 +9,7 @@ import type {
   Source,
 } from '@/types/chat';
 import {
+  getMessage,
   insertMessage,
   updateMessage,
   insertCitations,
@@ -23,7 +24,9 @@ export interface ActiveRun {
   assistantMessageId: string;
   status: 'running' | 'completed' | 'failed' | 'aborted';
   phase: ChatPhase | null;
+  timezone: string;
   accumulatedText: string;
+  accumulatedThinking: string;
   error?: { code: string; message: string; retryable: boolean };
   startedAt: string;
   completedAt?: string;
@@ -43,6 +46,13 @@ class RunManager {
    */
   public getRun(conversationId: string): ActiveRun | undefined {
     return this.runs.get(conversationId);
+  }
+
+  /**
+   * Register a run directly (used in tests to simulate active runs).
+   */
+  public registerActiveRunForTesting(run: ActiveRun): void {
+    this.runs.set(run.conversationId, run);
   }
 
   /**
@@ -102,6 +112,9 @@ class RunManager {
     preparedInput: PreparedAgentMessages;
     providerConfig?: ClientProviderConfig;
     timezone: string;
+    clientRequestId?: string;
+    /** Reuse an existing failed/interrupted assistant row for this retry. */
+    reuseAssistantMessage?: boolean;
     initialSubscriber?: (event: ChatEvent) => void;
   }): ActiveRun {
     const {
@@ -111,6 +124,8 @@ class RunManager {
       preparedInput,
       providerConfig,
       timezone,
+      clientRequestId,
+      reuseAssistantMessage,
       initialSubscriber,
     } = options;
 
@@ -134,7 +149,9 @@ class RunManager {
       assistantMessageId,
       status: 'running',
       phase: 'retrieving_history',
+      timezone,
       accumulatedText: '',
+      accumulatedThinking: '',
       startedAt: new Date().toISOString(),
       abortController,
       listeners,
@@ -143,15 +160,26 @@ class RunManager {
     this.runs.set(conversationId, run);
 
     // Persist placeholder assistant message in SQLite with 'interrupted' status
-    // so if the server crashes unexpectedly, state matches specification constraints
+    // so if the server crashes unexpectedly, state matches specification constraints.
+    // A retry reuses the failed row rather than creating a second assistant reply.
     try {
-      insertMessage({
-        id: assistantMessageId,
-        conversation_id: conversationId,
-        role: 'assistant',
-        content: '',
-        status: 'interrupted',
-      });
+      if (reuseAssistantMessage && getMessage(assistantMessageId)) {
+        updateMessage(assistantMessageId, {
+          content: '',
+          thinking: null,
+          status: 'interrupted',
+        });
+      } else {
+        insertMessage({
+          id: assistantMessageId,
+          conversation_id: conversationId,
+          role: 'assistant',
+          content: '',
+          thinking: null,
+          status: 'interrupted',
+          client_request_id: clientRequestId ? `${clientRequestId}:assistant` : null,
+        });
+      }
     } catch (err) {
       console.warn('Could not insert placeholder assistant message:', err);
     }
@@ -189,8 +217,16 @@ class RunManager {
           {
             onStatus: (phase) => {
               if (run.status !== 'running') return;
+              // Status is a UI hint, not a progress bar: emit only transitions.
+              // The model emits a delta per token, so broadcasting every onStatus
+              // call would flood the SSE stream and re-render the client.
+              if (run.phase === phase) return;
               run.phase = phase;
               broadcast({ type: 'status', phase });
+            },
+            onThinking: () => {
+              // Deliberately do not stream hidden chain-of-thought to the browser
+              // or persist it. The status phase is enough for the user.
             },
             onDelta: (text) => {
               if (run.status !== 'running') return;
@@ -206,6 +242,7 @@ class RunManager {
           run.status = 'aborted';
           updateMessage(assistantMessageId, {
             content: run.accumulatedText,
+            thinking: null,
             status: 'interrupted',
           });
           return;
@@ -221,6 +258,7 @@ class RunManager {
 
           updateMessage(assistantMessageId, {
             content: run.accumulatedText,
+            thinking: null,
             status: 'failed',
           });
 
@@ -236,9 +274,10 @@ class RunManager {
         const normalized = agentResult.normalized;
         const nowIso = new Date().toISOString();
 
-        // Persist final assistant response to SQLite
+        // Persist final assistant response to SQLite. Hidden reasoning is not stored.
         updateMessage(assistantMessageId, {
           content: normalized.text,
+          thinking: null,
           status: 'complete',
           model: normalized.model || null,
           provider_response_id: normalized.responseId || null,
@@ -263,6 +302,8 @@ class RunManager {
           sources: savedSources,
           createdAt: nowIso,
           timezoneUsed: timezone,
+          thinking: null,
+          text: normalized.text,
         });
       } catch (err: any) {
         if (abortController.signal.aborted) {

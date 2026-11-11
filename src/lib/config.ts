@@ -28,6 +28,10 @@ const ConfigSchema = z.object({
   OPENROUTER_API_KEY: z.string().optional().default(''),
   OPENROUTER_MODEL: z.string().optional().default(''),
 
+  EXA_API_KEY: z.string().optional().default(''),
+  FIRECRAWL_API_KEY: z.string().optional().default(''),
+  TAVILY_API_KEY: z.string().optional().default(''),
+
   DATABASE_PATH: z.string().default('./data/sift.sqlite'),
   PORT: z.coerce.number().default(3000),
 });
@@ -50,6 +54,9 @@ export type AppConfig = {
   groqModel: string;
   openrouterApiKey: string;
   openrouterModel: string;
+  exaApiKey: string;
+  firecrawlApiKey: string;
+  tavilyApiKey: string;
   databasePath: string;
   port: number;
 };
@@ -85,6 +92,10 @@ export function getConfig(): AppConfig {
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
     OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || '',
 
+    EXA_API_KEY: process.env.EXA_API_KEY || '',
+    FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY || '',
+    TAVILY_API_KEY: process.env.TAVILY_API_KEY || '',
+
     DATABASE_PATH: process.env.DATABASE_PATH || './data/sift.sqlite',
     PORT: process.env.PORT || 3000,
   };
@@ -117,6 +128,9 @@ export function getConfig(): AppConfig {
     groqModel: parsed.data.GROQ_MODEL.trim(),
     openrouterApiKey: parsed.data.OPENROUTER_API_KEY.trim(),
     openrouterModel: parsed.data.OPENROUTER_MODEL.trim(),
+    exaApiKey: parsed.data.EXA_API_KEY.trim(),
+    firecrawlApiKey: parsed.data.FIRECRAWL_API_KEY.trim(),
+    tavilyApiKey: parsed.data.TAVILY_API_KEY.trim(),
     databasePath: dbPath,
     port: parsed.data.PORT,
   };
@@ -164,6 +178,11 @@ export function getPublicConfigSummary() {
       cohere: hasCohere,
       groq: hasGroq,
       openrouter: hasOpenRouter,
+    },
+    searchProviders: {
+      exa: Boolean(config.exaApiKey),
+      firecrawl: Boolean(config.firecrawlApiKey),
+      tavily: Boolean(config.tavilyApiKey),
     },
     hasAnyKey,
     defaultProvider,

@@ -15,9 +15,10 @@ export function classifyIntent(
 
   // Change monitoring: checking if prices, features, releases changed since a past point
   const isChangeMonitoring =
-    /\b(changed?|shipping|shipped|updates?|releases?|new features?|pricing changes?)\s+(since|after)\b/i.test(lower) ||
-    /\bhas\s+(any|anyone|either|any of them|pricing|anything)\s+changed\b/i.test(lower) ||
-    /\b(any|what)\s+(changes|updates|new releases)\s+(since|after)\b/i.test(lower);
+    /\b(changed?|shipping|shipped|updates?|releases?|launched?|launching|announcements?|new features?|pricing changes?)\s+(since|after)\b/i.test(lower) ||
+    /\bhas\s+(any|anyone|either|any of them|pricing|anything)\s+(changed|launched|shipped|been announced)\b/i.test(lower) ||
+    /\bdid\s+.*?\s+(launch|ship|announce|release|change)\b/i.test(lower) ||
+    /\b(any|what)\s+(changes|updates|new releases|new launches)\s+(since|after)\b/i.test(lower);
 
   // Conversation recall only: asking what was asked, said, decided, shortlisted in the past without asking for current check
   const isRecallOnly =
@@ -63,8 +64,9 @@ export function classifyIntent(
     return { intent: 'current_research', requiresSearch: true };
   }
 
-  // Default follow-up: if user mentions pricing/limits/plans/freshness, search; otherwise false
-  const mentionsVolatileInfo = /\b(price|pricing|tier|cost|plan|limit|feature|release|update|version)\b/i.test(lower);
+  // Default follow-up: if user mentions pricing/limits/plans/freshness/launches, search; otherwise false
+  const mentionsVolatileInfo =
+    /\b(price|pricing|tier|cost|plan|limit|feature|release|update|version|launch|launched|announce|announced|changelog|news)\b/i.test(lower);
   return {
     intent: 'follow_up',
     requiresSearch: mentionsVolatileInfo,

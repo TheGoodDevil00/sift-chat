@@ -1,7 +1,3 @@
-import { OpenAI } from 'openai';
-import { Anthropic } from '@anthropic-ai/sdk';
-import { GoogleGenAI } from '@google/genai';
-import { CohereClientV2 } from 'cohere-ai';
 import { getConfig } from '../config';
 import { SIFT_SYSTEM_PROMPT } from './system-prompt';
 import type { PreparedAgentMessages } from './input-builder';
@@ -11,18 +7,28 @@ import {
   webSearchToolSchema,
   type SearchEvidence,
 } from './tools/web-search';
+import { deepScrapeUrl } from './tools/deep-scrape';
 import { listProviderModels } from './providers/list-models';
+import {
+  createProviderAdapter,
+  type ProviderAdapter,
+  type ProviderMessage,
+  type ToolDefinition,
+  type ToolCallRecord,
+} from './providers';
 import {
   normalizeSources,
   extractCitationsFromText,
-  normalizeCitations,
 } from '../citations/normalize';
 import { scrubSensitiveStrings } from '../crypto/scrub';
+import { validateCustomBaseUrl } from '../security/endpoint';
+import { parseVerificationReport, formatVerificationTable } from './verification';
 import type { ChatPhase, ClientProviderConfig, SupportedProvider } from '@/types/chat';
 
 export interface AgentRunCallbacks {
   onStatus?: (phase: ChatPhase) => void;
   onDelta?: (text: string) => void;
+  onThinking?: (text: string) => void;
 }
 
 export interface AgentRunResult {
@@ -33,12 +39,80 @@ export interface AgentRunResult {
   retryable?: boolean;
 }
 
+async function synthesizeFromEvidence(
+  adapter: ProviderAdapter,
+  messages: ProviderMessage[],
+  callbacks: AgentRunCallbacks | undefined,
+  signal: AbortSignal | undefined
+): Promise<string> {
+  messages.push({
+    role: 'user',
+    content:
+      'You have already retrieved the web evidence above. Write the final answer now, using that evidence. Do not call any tools. If the evidence is insufficient, say exactly what could not be verified.',
+  });
+
+  let synthesis = '';
+  callbacks?.onStatus?.('writing');
+  for await (const event of adapter.stream(messages, null, signal)) {
+    if (signal?.aborted) throw new Error('AbortError');
+    if (event.type === 'delta' && event.text) {
+      synthesis += event.text;
+      callbacks?.onDelta?.(event.text);
+    } else if (event.type === 'thinking' && event.text) {
+      callbacks?.onStatus?.('thinking');
+    }
+  }
+
+  return synthesis.trim();
+}
+
+function fallbackFromEvidence(evidence: SearchEvidence[]): string {
+  if (evidence.length === 0) {
+    return 'Based on the retrieved web sources, I was unable to verify definitive details for your query.';
+  }
+
+  const lines = evidence.slice(0, 6).map((item, index) => {
+    const title = item.title?.trim() || item.url;
+    const snippet = item.snippet?.trim().replace(/\s+/g, ' ').slice(0, 220);
+    return `${index + 1}. [${title}](${item.url})${snippet ? ` — ${snippet}` : ''}`;
+  });
+
+  return `I found the sources below, but I could not produce a reliable synthesis from them. These are the pages that were retrieved; please check them directly or retry.\n\n${lines.join('\n')}`;
+}
+
+function ensureSourceList(finalText: string, evidence: SearchEvidence[]): string {
+  if (evidence.length === 0) return finalText;
+  // If the model already cited a URL, keep its citations. If it omitted all
+  // links, append a deterministic list so an answer built on live evidence is
+  // never presented without provenance.
+  if (/https?:\/\//i.test(finalText)) return finalText;
+
+  const lines = evidence.slice(0, 6).map((item, index) => {
+    const title = (item.title?.trim() || item.url).replace(/[\[\]]/g, '');
+    return `${index + 1}. [${title}](${item.url})`;
+  });
+
+  return `${finalText}\n\nSources consulted:\n${lines.join('\n')}`;
+}
+
+function evidenceToSources(evidence: SearchEvidence[]): Array<{
+  url: string;
+  title?: string | null;
+  source_metadata_json?: string | null;
+}> {
+  return evidence.map((e) => ({
+    url: e.url,
+    title: e.title,
+    source_metadata_json: JSON.stringify({
+      retrievedAt: e.retrievedAt,
+      publishedAt: e.publishedAt,
+    }),
+  }));
+}
+
 /**
- * Universal agent runner implementing the single-tool execution loop:
- *
- * Receive message -> Construct context -> Invoke LLM -> Tool call?
- *   - Yes: Validate web_search args -> Execute search pipeline -> Persist evidence -> Return tool result to LLM -> Invoke LLM
- *   - No: Validate citations and answer -> Persist assistant response -> Stream final response
+ * Universal agent runner implementing a single unified tool execution loop
+ * across all LLM providers via the ProviderAdapter interface.
  */
 export async function runAgent(
   prepared: PreparedAgentMessages,
@@ -50,7 +124,38 @@ export async function runAgent(
   const config = getConfig();
   const provider: SupportedProvider = providerConfig?.provider || 'openai';
 
-  // 1. Resolve API key: client-supplied key takes priority (in-memory only), then server env
+  // 1. Validate a client-supplied endpoint before any credential is resolved.
+  // A custom base URL must never receive a server-side API key: the caller has to
+  // bring its own key. This closes the credential-exfiltration path.
+  let safeCustomBaseUrl: string | undefined;
+  if (providerConfig?.customBaseUrl) {
+    const isLocalProvider = provider === 'ollama' || provider === 'local';
+    const endpoint = validateCustomBaseUrl(providerConfig.customBaseUrl, provider, {
+      allowLoopback: isLocalProvider || process.env.NODE_ENV !== 'production',
+    });
+    if (!endpoint.ok) {
+      return {
+        success: false,
+        errorCode: 'INVALID_CUSTOM_BASE_URL',
+        errorMessage: endpoint.reason,
+        retryable: false,
+      };
+    }
+
+    if (!isLocalProvider && !providerConfig.apiKey?.trim()) {
+      return {
+        success: false,
+        errorCode: 'CUSTOM_ENDPOINT_REQUIRES_CLIENT_KEY',
+        errorMessage:
+          'A custom base URL requires your own API key for that endpoint. Server-side keys are never sent to a custom URL.',
+        retryable: false,
+      };
+    }
+
+    safeCustomBaseUrl = endpoint.url;
+  }
+
+  // 2. Resolve API key
   let apiKey = providerConfig?.apiKey?.trim();
   if (!apiKey) {
     if (provider === 'openai') apiKey = config.openaiApiKey;
@@ -65,7 +170,6 @@ export async function runAgent(
     else if (provider === 'local') apiKey = 'local';
   }
 
-  // Local models do not require a real API key
   if (!apiKey && (provider === 'ollama' || provider === 'local')) {
     apiKey = provider;
   }
@@ -74,12 +178,12 @@ export async function runAgent(
     return {
       success: false,
       errorCode: 'MISSING_API_KEY',
-      errorMessage: `No API key provided for ${provider.toUpperCase()}. Please configure it in the provider settings dropdown or set it in your .env file.`,
+      errorMessage: `No API key provided for ${provider.toUpperCase()}. Please configure it in provider settings or set it in your .env file.`,
       retryable: false,
     };
   }
 
-  // 2. Resolve Model
+  // 3. Resolve Model
   let model = providerConfig?.model?.trim();
   if (!model) {
     if (provider === 'openai') model = config.openaiModel;
@@ -94,10 +198,9 @@ export async function runAgent(
     else if (provider === 'local') model = 'local-model';
   }
 
-  // If still no model specified, dynamically query the provider's /models endpoint to get actual available model
   if (!model) {
     try {
-      const liveData = await listProviderModels(provider, apiKey, providerConfig?.customBaseUrl);
+      const liveData = await listProviderModels(provider, apiKey, safeCustomBaseUrl);
       if (liveData.models && liveData.models.length > 0) {
         model = liveData.models[0].id;
       }
@@ -116,446 +219,41 @@ export async function runAgent(
   }
 
   const fullInstructions = `${SIFT_SYSTEM_PROMPT}\n\n${prepared.systemPromptAdditions}`;
-
-  // Route to the tool execution loop based on provider
-  if (provider === 'anthropic') {
-    return runAnthropicToolLoop(apiKey, model!, fullInstructions, prepared, assistantMessageId, callbacks, signal);
-  } else if (provider === 'gemini') {
-    return runGeminiToolLoop(apiKey, model!, fullInstructions, prepared, assistantMessageId, callbacks, signal);
-  } else if (provider === 'cohere') {
-    return runCohereToolLoop(apiKey, model!, fullInstructions, prepared, assistantMessageId, callbacks, signal);
-  } else {
-    // OpenAI, DeepSeek, xAI, Groq, OpenRouter, Ollama, Local use the standard tool calling loop
-    let baseUrl = providerConfig?.customBaseUrl;
-    let label = 'OpenAI';
-    if (provider === 'deepseek') {
-      baseUrl = baseUrl || 'https://api.deepseek.com';
-      label = 'DeepSeek';
-    } else if (provider === 'xai') {
-      baseUrl = baseUrl || 'https://api.x.ai/v1';
-      label = 'xAI Grok';
-    } else if (provider === 'groq') {
-      baseUrl = baseUrl || 'https://api.groq.com/openai/v1';
-      label = 'Groq';
-    } else if (provider === 'openrouter') {
-      baseUrl = baseUrl || 'https://openrouter.ai/api/v1';
-      label = 'OpenRouter';
-    } else if (provider === 'ollama') {
-      baseUrl = baseUrl || 'http://localhost:11434/v1';
-      label = 'Ollama';
-    } else if (provider === 'local') {
-      baseUrl = baseUrl || 'http://localhost:1234/v1';
-      label = 'Local Model';
-    }
-
-    return runOpenAIToolLoop(apiKey, baseUrl, model!, fullInstructions, prepared, assistantMessageId, label, callbacks, signal);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Unified Tool Loop: OpenAI, DeepSeek, xAI, Groq, OpenRouter, Ollama, Local
-// ---------------------------------------------------------------------------
-async function runOpenAIToolLoop(
-  apiKey: string,
-  baseURL: string | undefined,
-  model: string,
-  fullInstructions: string,
-  prepared: PreparedAgentMessages,
-  assistantMessageId: string,
-  providerLabel: string,
-  callbacks?: AgentRunCallbacks,
-  signal?: AbortSignal
-): Promise<AgentRunResult> {
-  const defaultHeaders: Record<string, string> = {};
-  if (providerLabel === 'OpenRouter') {
-    defaultHeaders['HTTP-Referer'] = 'https://sift.local';
-    defaultHeaders['X-Title'] = 'Sift Research Agent';
-  }
-
-  const client = new OpenAI({
-    apiKey: apiKey || 'dummy-key',
-    baseURL,
-    timeout: 60000,
-    defaultHeaders: Object.keys(defaultHeaders).length > 0 ? defaultHeaders : undefined,
-  });
-
-  const allEvidence: SearchEvidence[] = [];
-  const messages: any[] = [
-    { role: 'system', content: fullInstructions },
-    ...prepared.inputItems.map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    })),
-  ];
-
-  // Expose ONLY our single web_search tool
-  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
-    {
-      type: 'function',
-      function: webSearchToolSchema,
-    },
-  ];
-
-  let iterations = 0;
-  const maxIterations = 5;
+  const providerLabel = provider.toUpperCase();
 
   try {
-    while (iterations++ < maxIterations) {
-      if (signal?.aborted) throw new Error('AbortError');
-
-      // Invoke LLM
-      const requestPayload: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
-        model,
-        messages,
-        tools,
-        stream: false,
-      };
-
-      // Ollama does not support the tool_choice property in /v1/chat/completions
-      if (providerLabel !== 'Ollama') {
-        requestPayload.tool_choice = 'auto';
-      }
-
-      const response = await client.chat.completions.create(requestPayload, { signal });
-
-      const choice = response.choices?.[0];
-      const message = choice?.message;
-      if (!message) throw new Error('Empty model response received');
-
-      // F{Tool call?}
-      const toolCalls = message.tool_calls || [];
-      if (toolCalls.length > 0) {
-        // Append assistant tool_calls message
-        messages.push(message);
-
-        for (const toolCall of toolCalls) {
-          // G[Validate web_search arguments]
-          if (toolCall.function.name === 'web_search') {
-            callbacks?.onStatus?.('searching_web');
-            let parsedArgs: any = {};
-            try {
-              parsedArgs = JSON.parse(toolCall.function.arguments || '{}');
-            } catch {
-              parsedArgs = { query: toolCall.function.arguments };
-            }
-
-            // H[Execute search pipeline]
-            const query = (parsedArgs.query || '').trim();
-            const evidence = await internalWebSearchTool.execute({
-              query,
-              recency: parsedArgs.recency,
-              maxResults: parsedArgs.maxResults || 6,
-            });
-
-            // I[Persist retrieved evidence]
-            for (const item of evidence) {
-              allEvidence.push(item);
-            }
-
-            // J[Return tool result to LLM]
-            messages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id,
-              content: JSON.stringify(evidence),
-            });
-          }
-        }
-        // Loop back to E[Invoke LLM]
-        continue;
-      }
-
-      // F -> No: Final response received
-      const finalText = message.content || '';
-      callbacks?.onStatus?.('writing');
-      callbacks?.onDelta?.(finalText);
-
-      // K[Validate citations and answer]
-      const textCitations = extractCitationsFromText(finalText, assistantMessageId);
-      const normalizedSources = normalizeSources(
-        allEvidence.map((e) => ({ url: e.url, title: e.title })),
-        assistantMessageId
-      );
-
-      return {
-        success: true,
-        normalized: {
-          text: finalText,
-          citations: textCitations,
-          sources: normalizedSources,
-          model,
-          responseId: response.id || `${providerLabel.toLowerCase()}_${Date.now()}`,
-          finishReason: choice.finish_reason || 'completed',
-        },
-      };
-    }
-
-    throw new Error('Exceeded maximum tool call iterations');
+    const adapter = createProviderAdapter(provider, apiKey, model, safeCustomBaseUrl);
+    return await executeUnifiedToolLoop(
+      adapter,
+      fullInstructions,
+      prepared,
+      model,
+      assistantMessageId,
+      providerLabel,
+      callbacks,
+      signal,
+      providerConfig
+    );
   } catch (err: any) {
     return handleProviderError(err, providerLabel, signal);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Unified Tool Loop: Anthropic Claude
+// Single Unified Tool Execution Loop
 // ---------------------------------------------------------------------------
-async function runAnthropicToolLoop(
-  apiKey: string,
-  model: string,
+async function executeUnifiedToolLoop(
+  adapter: ProviderAdapter,
   fullInstructions: string,
   prepared: PreparedAgentMessages,
-  assistantMessageId: string,
-  callbacks?: AgentRunCallbacks,
-  signal?: AbortSignal
-): Promise<AgentRunResult> {
-  const client = new Anthropic({
-    apiKey,
-    timeout: 60000,
-  });
-
-  const allEvidence: SearchEvidence[] = [];
-  const messages: any[] = prepared.inputItems.map((m) => ({
-    role: m.role === 'assistant' ? 'assistant' : 'user',
-    content: m.content,
-  }));
-
-  // Expose ONLY our single web_search tool
-  const anthropicTools: Anthropic.Tool[] = [
-    {
-      name: 'web_search',
-      description: webSearchToolSchema.description,
-      input_schema: {
-        type: 'object',
-        properties: webSearchToolSchema.parameters.properties as any,
-        required: webSearchToolSchema.parameters.required,
-      },
-    },
-  ];
-
-  let iterations = 0;
-  const maxIterations = 5;
-
-  try {
-    while (iterations++ < maxIterations) {
-      if (signal?.aborted) throw new Error('AbortError');
-
-      const response = await client.messages.create(
-        {
-          model,
-          max_tokens: 4096,
-          system: fullInstructions,
-          messages,
-          tools: anthropicTools,
-        },
-        { signal }
-      );
-
-      // F{Tool call?}
-      if (response.stop_reason === 'tool_use') {
-        messages.push({
-          role: 'assistant',
-          content: response.content,
-        });
-
-        const toolResultBlocks: any[] = [];
-
-        for (const block of response.content) {
-          if (block.type === 'tool_use' && block.name === 'web_search') {
-            callbacks?.onStatus?.('searching_web');
-            const input: any = block.input || {};
-
-            // H[Execute search pipeline]
-            const evidence = await internalWebSearchTool.execute({
-              query: (input.query || '').trim(),
-              recency: input.recency,
-              maxResults: input.maxResults || 6,
-            });
-
-            // I[Persist retrieved evidence]
-            for (const item of evidence) {
-              allEvidence.push(item);
-            }
-
-            // J[Return tool result to LLM]
-            toolResultBlocks.push({
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content: JSON.stringify(evidence),
-            });
-          }
-        }
-
-        messages.push({
-          role: 'user',
-          content: toolResultBlocks,
-        });
-
-        // Loop back to E[Invoke LLM]
-        continue;
-      }
-
-      // F -> No: Final response
-      let finalText = '';
-      for (const block of response.content) {
-        if (block.type === 'text') {
-          finalText += block.text;
-        }
-      }
-
-      callbacks?.onStatus?.('writing');
-      callbacks?.onDelta?.(finalText);
-
-      // K[Validate citations and answer]
-      const textCitations = extractCitationsFromText(finalText, assistantMessageId);
-      const normalizedSources = normalizeSources(
-        allEvidence.map((e) => ({ url: e.url, title: e.title })),
-        assistantMessageId
-      );
-
-      return {
-        success: true,
-        normalized: {
-          text: finalText,
-          citations: textCitations,
-          sources: normalizedSources,
-          model,
-          responseId: response.id || `anthropic_${Date.now()}`,
-          finishReason: response.stop_reason || 'completed',
-        },
-      };
-    }
-
-    throw new Error('Exceeded maximum tool call iterations');
-  } catch (err: any) {
-    return handleProviderError(err, 'Anthropic', signal);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Unified Tool Loop: Google Gemini
-// ---------------------------------------------------------------------------
-async function runGeminiToolLoop(
-  apiKey: string,
   model: string,
-  fullInstructions: string,
-  prepared: PreparedAgentMessages,
   assistantMessageId: string,
+  providerLabel: string,
   callbacks?: AgentRunCallbacks,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  providerConfig?: ClientProviderConfig
 ): Promise<AgentRunResult> {
-  const ai = new GoogleGenAI({ apiKey });
-  const allEvidence: SearchEvidence[] = [];
-
-  const geminiTools: any[] = [
-    {
-      functionDeclarations: [
-        {
-          name: 'web_search',
-          description: webSearchToolSchema.description,
-          parameters: webSearchToolSchema.parameters,
-        },
-      ],
-    },
-  ];
-
-  try {
-    const chat = ai.chats.create({
-      model,
-      config: {
-        systemInstruction: fullInstructions,
-        tools: geminiTools,
-      },
-    });
-
-    let iterations = 0;
-    const maxIterations = 5;
-
-    // Send the user prompt
-    let nextMessage: any = prepared.inputItems[prepared.inputItems.length - 1]?.content || '';
-
-    while (iterations++ < maxIterations) {
-      if (signal?.aborted) throw new Error('AbortError');
-
-      const response = await chat.sendMessage({
-        message: nextMessage,
-      });
-
-      const functionCalls = response.functionCalls;
-      if (functionCalls && functionCalls.length > 0) {
-        callbacks?.onStatus?.('searching_web');
-        const functionResponses: any[] = [];
-
-        for (const fc of functionCalls) {
-          if (fc.name === 'web_search') {
-            const args: any = fc.args || {};
-            const evidence = await internalWebSearchTool.execute({
-              query: (args.query || '').trim(),
-              recency: args.recency,
-              maxResults: args.maxResults || 6,
-            });
-
-            for (const item of evidence) {
-              allEvidence.push(item);
-            }
-
-            functionResponses.push({
-              functionResponse: {
-                name: 'web_search',
-                response: { evidence },
-              },
-            });
-          }
-        }
-
-        nextMessage = functionResponses;
-        continue;
-      }
-
-      // Final response text
-      const finalText = response.text || '';
-      callbacks?.onStatus?.('writing');
-      callbacks?.onDelta?.(finalText);
-
-      const textCitations = extractCitationsFromText(finalText, assistantMessageId);
-      const normalizedSources = normalizeSources(
-        allEvidence.map((e) => ({ url: e.url, title: e.title })),
-        assistantMessageId
-      );
-
-      return {
-        success: true,
-        normalized: {
-          text: finalText,
-          citations: textCitations,
-          sources: normalizedSources,
-          model,
-          responseId: `gemini_${Date.now()}`,
-          finishReason: 'completed',
-        },
-      };
-    }
-
-    throw new Error('Exceeded maximum tool call iterations');
-  } catch (err: any) {
-    return handleProviderError(err, 'Google Gemini', signal);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Unified Tool Loop: Cohere
-// ---------------------------------------------------------------------------
-async function runCohereToolLoop(
-  apiKey: string,
-  model: string,
-  fullInstructions: string,
-  prepared: PreparedAgentMessages,
-  assistantMessageId: string,
-  callbacks?: AgentRunCallbacks,
-  signal?: AbortSignal
-): Promise<AgentRunResult> {
-  const cohere = new CohereClientV2({ token: apiKey });
-  const allEvidence: SearchEvidence[] = [];
-
-  const messages: any[] = [
+  const messages: ProviderMessage[] = [
     { role: 'system', content: fullInstructions },
     ...prepared.inputItems.map((m) => ({
       role: m.role as 'user' | 'assistant',
@@ -563,77 +261,111 @@ async function runCohereToolLoop(
     })),
   ];
 
-  const cohereTools: any[] = [
-    {
-      type: 'function',
-      function: webSearchToolSchema,
-    },
-  ];
-
+  const tools: ToolDefinition[] = [webSearchToolSchema];
+  const searchRequired = prepared.requiresSearch === true;
+  const allEvidence: SearchEvidence[] = [];
+  let searchCallCount = 0;
+  let forcedSearchRetry = false;
   let iterations = 0;
   const maxIterations = 5;
+  let finalResponseId: string | undefined;
+  let finalFinishReason: string | undefined;
 
-  try {
-    while (iterations++ < maxIterations) {
+  while (iterations++ < maxIterations) {
+    if (signal?.aborted) throw new Error('AbortError');
+
+    let turnText = '';
+    const pendingToolCalls: ToolCallRecord[] = [];
+
+    for await (const event of adapter.stream(messages, tools, signal)) {
       if (signal?.aborted) throw new Error('AbortError');
 
-      const response = await cohere.chat({
-        model,
-        messages: messages as any,
-        tools: cohereTools,
-      });
-
-      const toolCalls = response.message?.toolCalls || [];
-      if (toolCalls.length > 0) {
-        messages.push(response.message);
-
-        for (const tc of toolCalls) {
-          if (tc.function?.name === 'web_search') {
-            callbacks?.onStatus?.('searching_web');
-            let parsedArgs: any = {};
-            try {
-              parsedArgs = JSON.parse(tc.function.arguments || '{}');
-            } catch {
-              parsedArgs = { query: tc.function.arguments };
-            }
-
-            const evidence = await internalWebSearchTool.execute({
-              query: (parsedArgs.query || '').trim(),
-              recency: parsedArgs.recency,
-              maxResults: parsedArgs.maxResults || 6,
-            });
-
-            for (const item of evidence) {
-              allEvidence.push(item);
-            }
-
-            messages.push({
-              role: 'tool',
-              toolCallId: tc.id,
-              content: JSON.stringify(evidence),
-            });
-          }
+      if (event.type === 'delta' && event.text) {
+        turnText += event.text;
+        // When search is mandatory and none has happened yet, buffer the turn.
+        // This prevents an unverified answer from being streamed before we can enforce the tool call.
+        if (!searchRequired || searchCallCount > 0) {
+          callbacks?.onStatus?.('writing');
+          callbacks?.onDelta?.(event.text);
         }
-        continue;
+      } else if (event.type === 'thinking' && event.text) {
+        // Reasoning tokens are not part of the product surface. Show a phase
+        // hint, but never stream or retain hidden chain-of-thought.
+        callbacks?.onStatus?.('thinking');
+      } else if (event.type === 'tool_call' && event.toolCall) {
+        pendingToolCalls.push(event.toolCall);
+      } else if (event.type === 'done') {
+        if (event.finishReason) finalFinishReason = event.finishReason;
+        if (event.responseId) finalResponseId = event.responseId;
+      }
+    }
+
+    // If no tool was called, we have our final response
+    if (pendingToolCalls.length === 0) {
+      // Enforcement: a volatile question may not be answered from model memory alone.
+      if (searchRequired && searchCallCount === 0) {
+        if (!forcedSearchRetry) {
+          forcedSearchRetry = true;
+          messages.push({ role: 'assistant', content: turnText });
+          messages.push({
+            role: 'user',
+            content:
+              'STOP. You answered without calling web_search. This question is about current, volatile, or previously discussed facts and MUST be verified against live web evidence. Call web_search now with a concrete query. Do not answer from memory.',
+          });
+          continue;
+        }
+
+        const unavailableText =
+          'I could not complete a live web verification for this question, so I do not want to guess. Please retry, or check the official sources directly.';
+        callbacks?.onDelta?.(unavailableText);
+        return {
+          success: true,
+          normalized: {
+            text: unavailableText,
+            citations: [],
+            sources: [],
+            model,
+            responseId: finalResponseId || `${providerLabel.toLowerCase()}_${Date.now()}`,
+            finishReason: 'search_not_completed',
+          },
+        };
       }
 
-      // Final response text
-      const contentParts = response.message?.content || [];
-      let finalText = '';
-      for (const p of contentParts) {
-        if (p.type === 'text') {
-          finalText += p.text;
+      let finalText = turnText.trim();
+
+      // Check if output is a JSON structured verification report
+      const structuredReport = parseVerificationReport(finalText);
+      if (structuredReport) {
+        finalText = formatVerificationTable(structuredReport);
+      }
+
+      if (!finalText) {
+        // Some tool-capable models return an empty final turn after retrieving
+        // evidence. Give them one explicit, tool-free synthesis chance before
+        // falling back to a deterministic source list.
+        if (allEvidence.length > 0) {
+          if (turnText) messages.push({ role: 'assistant', content: turnText });
+          finalText = await synthesizeFromEvidence(adapter, messages, callbacks, signal);
+        }
+        if (!finalText) {
+          finalText = fallbackFromEvidence(allEvidence);
+          callbacks?.onDelta?.(finalText);
         }
       }
 
-      callbacks?.onStatus?.('writing');
-      callbacks?.onDelta?.(finalText);
+      finalText = ensureSourceList(finalText, allEvidence);
 
-      const textCitations = extractCitationsFromText(finalText, assistantMessageId);
-      const normalizedSources = normalizeSources(
-        allEvidence.map((e) => ({ url: e.url, title: e.title })),
-        assistantMessageId
-      );
+      // A completed search that produced no evidence must not masquerade as a verified answer.
+      if (searchRequired && allEvidence.length === 0) {
+        const caveat = '\n\n_No live sources were returned for this search, so I could not verify current details. This is not proof that nothing changed._';
+        if (!finalText.includes(caveat.trim())) {
+          finalText += caveat;
+          callbacks?.onDelta?.(caveat);
+        }
+      }
+
+      const textCitations = extractCitationsFromText(finalText, assistantMessageId, allEvidence);
+      const normalizedSources = normalizeSources(evidenceToSources(allEvidence), assistantMessageId);
 
       return {
         success: true,
@@ -642,20 +374,183 @@ async function runCohereToolLoop(
           citations: textCitations,
           sources: normalizedSources,
           model,
-          responseId: response.id || `cohere_${Date.now()}`,
-          finishReason: 'completed',
+          responseId: finalResponseId || `${providerLabel.toLowerCase()}_${Date.now()}`,
+          finishReason: finalFinishReason || 'completed',
         },
       };
     }
 
-    throw new Error('Exceeded maximum tool call iterations');
-  } catch (err: any) {
-    return handleProviderError(err, 'Cohere', signal);
+    // Execute tool calls
+    messages.push({
+      role: 'assistant',
+      content: turnText,
+      tool_calls: pendingToolCalls,
+    });
+
+    callbacks?.onStatus?.('searching_web');
+
+    // Execute multiple tool calls in parallel to eliminate sequential network latency bottlenecks
+    const toolExecutions = await Promise.all(
+      pendingToolCalls.map(async (tc) => {
+        if (tc.name === 'web_search') {
+          let args: any = {};
+          try {
+            args = JSON.parse(tc.arguments || '{}');
+          } catch {
+            args = {};
+          }
+
+          const query = (args.query || '').trim();
+          if (!query) {
+            return {
+              tc,
+              evidence: [],
+              boundedEvidence: { error: 'web_search requires a non-empty query.', query },
+              isError: false,
+              attemptedSearch: false,
+            };
+          }
+
+          searchCallCount += 1;
+          const evidence = await internalWebSearchTool.execute({
+            query,
+            recency: args.recency,
+            maxResults: args.maxResults || 5,
+            searchKeys: providerConfig?.searchKeys,
+          });
+
+          // Stage 2: Deep Content Extraction for Critical Pages
+          // Fires when top result has no extracted content or only a brief search snippet (< 300 chars)
+          if (evidence.length > 0 && (!evidence[0].extractedContent || evidence[0].extractedContent.length < 300)) {
+            try {
+              const deepContent = await deepScrapeUrl(
+                evidence[0].url,
+                4000,
+                providerConfig?.searchKeys?.firecrawl
+              );
+              if (deepContent) {
+                evidence[0].extractedContent = deepContent;
+              }
+            } catch (scrapeErr) {
+              console.warn('Deep scrape fallback failed:', scrapeErr);
+            }
+          }
+
+          return {
+            tc,
+            evidence,
+            boundedEvidence:
+              evidence.length > 0
+                ? {
+                    query,
+                    resultCount: evidence.length,
+                    results: evidence.map((e) => ({
+                      title: e.title,
+                      url: e.url,
+                      snippet: e.snippet?.slice(0, 400),
+                      publishedAt: e.publishedAt,
+                      extractedContent: e.extractedContent?.slice(0, 2500),
+                    })),
+                  }
+                : {
+                    query,
+                    resultCount: 0,
+                    error:
+                      'No search results were returned. Do not treat this as evidence that nothing changed. Try a different query or state the limitation.',
+                  },
+            isError: false,
+            attemptedSearch: true,
+          };
+        } else {
+          return {
+            tc,
+            evidence: [],
+            boundedEvidence: null,
+            isError: true,
+            attemptedSearch: false,
+          };
+        }
+      })
+    );
+
+    for (const res of toolExecutions) {
+      if (res.isError) {
+        messages.push({
+          role: 'tool',
+          content: JSON.stringify({ error: `Tool ${res.tc.name} not found.` }),
+          tool_call_id: res.tc.id,
+        });
+      } else {
+        for (const item of res.evidence) {
+          allEvidence.push(item);
+        }
+        messages.push({
+          role: 'tool',
+          content: JSON.stringify(res.boundedEvidence),
+          tool_call_id: res.tc.id,
+        });
+      }
+    }
   }
+
+  // Never synthesize a volatile answer without any live evidence.
+  if (searchRequired && searchCallCount === 0) {
+    const unavailableText =
+      'I could not complete a live web verification for this question, so I do not want to guess. Please retry, or check the official sources directly.';
+    callbacks?.onDelta?.(unavailableText);
+    return {
+      success: true,
+      normalized: {
+        text: unavailableText,
+        citations: [],
+        sources: [],
+        model,
+        responseId: finalResponseId || `${providerLabel.toLowerCase()}_${Date.now()}`,
+        finishReason: 'search_not_completed',
+      },
+    };
+  }
+
+  // Max iterations reached with tool calls -> force final synthesis turn without tools
+  let finalText = await synthesizeFromEvidence(adapter, messages, callbacks, signal);
+  const structuredReport = parseVerificationReport(finalText);
+  if (structuredReport) {
+    finalText = formatVerificationTable(structuredReport);
+  }
+
+  if (!finalText) {
+    finalText = fallbackFromEvidence(allEvidence);
+    callbacks?.onDelta?.(finalText);
+  }
+
+  finalText = ensureSourceList(finalText, allEvidence);
+
+  if (searchRequired && allEvidence.length === 0) {
+    const caveat = '\n\n_No live sources were returned for this search, so I could not verify current details. This is not proof that nothing changed._';
+    if (!finalText.includes(caveat.trim())) {
+      finalText += caveat;
+      callbacks?.onDelta?.(caveat);
+    }
+  }
+
+  const textCitations = extractCitationsFromText(finalText, assistantMessageId, allEvidence);
+  const normalizedSources = normalizeSources(evidenceToSources(allEvidence), assistantMessageId);
+
+  return {
+    success: true,
+    normalized: {
+      text: finalText,
+      citations: textCitations,
+      sources: normalizedSources,
+      model,
+      responseId: finalResponseId || `${providerLabel.toLowerCase()}_${Date.now()}`,
+      finishReason: 'completed',
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Error Helper
+// Error Handling
 // ---------------------------------------------------------------------------
 function handleProviderError(err: any, providerLabel: string, signal?: AbortSignal): AgentRunResult {
   if (err?.name === 'AbortError' || signal?.aborted) {
@@ -671,7 +566,13 @@ function handleProviderError(err: any, providerLabel: string, signal?: AbortSign
   const rawMsg = err?.message || err?.error?.message || `An error occurred while contacting ${providerLabel}.`;
   const msg = scrubSensitiveStrings(rawMsg);
 
-  if (status === 401 || status === 403 || msg.includes('authentication') || msg.includes('unauthorized') || msg.includes('User not found')) {
+  if (
+    status === 401 ||
+    status === 403 ||
+    msg.includes('authentication') ||
+    msg.includes('unauthorized') ||
+    msg.includes('User not found')
+  ) {
     return {
       success: false,
       errorCode: 'AUTHENTICATION_FAILED',
@@ -699,7 +600,7 @@ function handleProviderError(err: any, providerLabel: string, signal?: AbortSign
   }
 
   if (msg.includes('fetch failed') || msg.includes('ECONNREFUSED') || msg.includes('Connect Timeout')) {
-    if (providerLabel === 'Ollama' || providerLabel === 'Local Model') {
+    if (providerLabel === 'OLLAMA' || providerLabel === 'LOCAL') {
       return {
         success: false,
         errorCode: 'LOCAL_SERVER_UNREACHABLE',
