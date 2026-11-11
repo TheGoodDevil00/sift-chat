@@ -16,6 +16,7 @@ export function insertMessage(
     conversation_id: string;
     role: MessageRole;
     content: string;
+    thinking?: string | null;
     created_at?: string;
     status?: MessageStatus;
     client_request_id?: string | null;
@@ -31,7 +32,7 @@ export function insertMessage(
   if (data.client_request_id) {
     const existing = db
       .prepare(`
-        SELECT id, conversation_id, role, content, created_at, status,
+        SELECT id, conversation_id, role, content, thinking, created_at, status,
                client_request_id, model, provider_response_id, usage_json
         FROM messages
         WHERE client_request_id = ?
@@ -52,6 +53,7 @@ export function insertMessage(
     conversation_id: data.conversation_id,
     role: data.role,
     content: data.content,
+    thinking: data.thinking || null,
     created_at,
     status,
     client_request_id: data.client_request_id || null,
@@ -62,14 +64,15 @@ export function insertMessage(
 
   db.prepare(`
     INSERT INTO messages (
-      id, conversation_id, role, content, created_at, status,
+      id, conversation_id, role, content, thinking, created_at, status,
       client_request_id, model, provider_response_id, usage_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     message.id,
     message.conversation_id,
     message.role,
     message.content,
+    message.thinking,
     message.created_at,
     message.status,
     message.client_request_id,
@@ -81,6 +84,24 @@ export function insertMessage(
   return { message, isExisting: false };
 }
 
+export function getMessageByClientRequestId(
+  clientRequestId: string,
+  dbInstance?: Database.Database
+): Message | null {
+  if (!clientRequestId) return null;
+  const db = dbInstance || getDb();
+  const row = db
+    .prepare(`
+      SELECT id, conversation_id, role, content, thinking, created_at, status,
+             client_request_id, model, provider_response_id, usage_json
+      FROM messages
+      WHERE client_request_id = ?
+    `)
+    .get(clientRequestId) as Message | undefined;
+
+  return row || null;
+}
+
 export function getMessage(
   id: string,
   dbInstance?: Database.Database
@@ -88,7 +109,7 @@ export function getMessage(
   const db = dbInstance || getDb();
   const row = db
     .prepare(`
-      SELECT id, conversation_id, role, content, created_at, status,
+      SELECT id, conversation_id, role, content, thinking, created_at, status,
              client_request_id, model, provider_response_id, usage_json
       FROM messages
       WHERE id = ?
@@ -102,6 +123,7 @@ export function updateMessage(
   id: string,
   updates: {
     content?: string;
+    thinking?: string | null;
     status?: MessageStatus;
     provider_response_id?: string | null;
     model?: string | null;
@@ -114,6 +136,7 @@ export function updateMessage(
   if (!current) return;
 
   const content = updates.content !== undefined ? updates.content : current.content;
+  const thinking = updates.thinking !== undefined ? updates.thinking : current.thinking;
   const status = updates.status !== undefined ? updates.status : current.status;
   const provider_response_id =
     updates.provider_response_id !== undefined
@@ -125,9 +148,9 @@ export function updateMessage(
 
   db.prepare(`
     UPDATE messages
-    SET content = ?, status = ?, provider_response_id = ?, model = ?, usage_json = ?
+    SET content = ?, thinking = ?, status = ?, provider_response_id = ?, model = ?, usage_json = ?
     WHERE id = ?
-  `).run(content, status, provider_response_id, model, usage_json, id);
+  `).run(content, thinking, status, provider_response_id, model, usage_json, id);
 }
 
 export function getRecentMessages(
@@ -139,7 +162,7 @@ export function getRecentMessages(
   // Fetch newest `limit` messages then order them chronologically
   const rows = db
     .prepare(`
-      SELECT id, conversation_id, role, content, created_at, status,
+      SELECT id, conversation_id, role, content, thinking, created_at, status,
              client_request_id, model, provider_response_id, usage_json
       FROM messages
       WHERE conversation_id = ? AND status != 'failed'
@@ -301,7 +324,7 @@ export function getConversationMessagesWithMeta(
   const db = dbInstance || getDb();
   const messages = db
     .prepare(`
-      SELECT id, conversation_id, role, content, created_at, status,
+      SELECT id, conversation_id, role, content, thinking, created_at, status,
              client_request_id, model, provider_response_id, usage_json
       FROM messages
       WHERE conversation_id = ?

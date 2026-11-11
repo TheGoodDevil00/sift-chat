@@ -56,11 +56,11 @@ export interface FtsMatchResult {
  * Searches the messages_fts virtual table using BM25 ranking.
  */
 export function searchMessagesFts(
-  query: string,
+  query: string | string[],
   limit = 20,
   dbInstance?: Database.Database
 ): FtsMatchResult[] {
-  const terms = extractFtsQueryTerms(query);
+  const terms = Array.isArray(query) ? query : extractFtsQueryTerms(query);
   const matchExpr = buildFts5Query(terms);
   if (!matchExpr) return [];
 

@@ -34,6 +34,10 @@ export function getDb(customPath?: string): Database.Database {
   return db;
 }
 
+export function setDbForTesting(db: Database.Database | null): void {
+  dbInstance = db;
+}
+
 export function closeDb(): void {
   if (dbInstance) {
     try {

@@ -117,6 +117,19 @@ export function runMigrations(db: Database.Database): void {
         `);
       },
     },
+    {
+      name: '002_add_thinking_to_messages',
+      up: (db) => {
+        // Safe column addition: check if column already exists
+        const columns = db
+          .prepare(`PRAGMA table_info(messages)`)
+          .all() as Array<{ name: string }>;
+        const hasThinking = columns.some((col) => col.name === 'thinking');
+        if (!hasThinking) {
+          db.exec(`ALTER TABLE messages ADD COLUMN thinking TEXT NULL;`);
+        }
+      },
+    },
   ];
 
   for (const m of migrations) {
