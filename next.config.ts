@@ -2,6 +2,9 @@ import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['better-sqlite3'],
+  // The in-app preview and some local tools address the dev server as 127.0.0.1
+  // rather than localhost. Next blocks cross-origin dev assets by default.
+  allowedDevOrigins: ['127.0.0.1'],
   async headers() {
     return [
       {
