@@ -315,10 +315,10 @@ export function SiftChat() {
               <MessageList messages={messages} streamingMessage={streamingMessage} />
             )}
 
-            {/* Recoverable Error Banner */}
-            {error && (
+            {/* Recoverable Generation Error Banner (conversation load errors remain strictly in top-right status indicator) */}
+            {streamError && (
               <div className="my-3 p-3 bg-red-50 border border-red-300 rounded-md text-xs text-red-700 flex items-center justify-between shadow-2xs">
-                <span>{error}</span>
+                <span>{streamError}</span>
                 <div className="flex items-center gap-2 ml-3">
                   <button
                     onClick={() => setIsSettingsOpen(true)}

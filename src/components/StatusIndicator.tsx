@@ -14,7 +14,6 @@ export function StatusIndicator({ phase, error, configured = true }: StatusIndic
   if (error) {
     return (
       <div className="flex items-center gap-1.5 text-xs text-red-600 bg-red-50 border border-red-200 px-2.5 py-1 rounded">
-        <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
         <span className="font-semibold">Error: {error}</span>
       </div>
     );

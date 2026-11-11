@@ -44,6 +44,11 @@ export function useConversations(onConversationLoaded?: (id: string, activeRun?:
           setMessages(loadedMessages);
           onConversationLoaded?.(id, data.activeRun);
         } else {
+          try {
+            localStorage.removeItem('sift_active_conversation_id');
+          } catch {}
+          setActiveConversationId(null);
+          setMessages([]);
           setError('Could not load historical conversation.');
         }
       } catch (err) {
