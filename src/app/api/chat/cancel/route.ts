@@ -20,7 +20,14 @@ export async function POST(req: NextRequest) {
     }
 
     const cancelled = runManager.cancelRun(parsed.data.conversationId);
-    return NextResponse.json({ success: true, cancelled });
+    if (!cancelled) {
+      return NextResponse.json(
+        { error: 'No active run found for this conversation', code: 'RUN_NOT_FOUND', cancelled: false },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json({ success: true, cancelled: true });
   } catch (err: any) {
     return NextResponse.json(
       { error: err.message || 'Failed to cancel run', code: 'INTERNAL_ERROR' },
