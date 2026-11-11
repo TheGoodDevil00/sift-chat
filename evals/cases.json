@@ -117,6 +117,50 @@
     ]
   },
   {
+    "id": "eval-6-topic-words-outside-window",
+    "name": "Journey F: Named day wins even when its wording differs from the query",
+    "description": "The named Tuesday conversation is about Neon vs Supabase and never says Postgres or hosting. The same words appear only in an unrelated September chat. The Tuesday turns must still be the evidence.",
+    "timezone": "UTC",
+    "referenceDate": "2026-11-10T12:00:00.000Z",
+    "historySeed": [
+      {
+        "conversationTitle": "Tuesday DB choice",
+        "role": "user",
+        "createdAt": "2026-11-03T15:00:00.000Z",
+        "content": "Compare Neon and Supabase Pro for our 20-person backend team."
+      },
+      {
+        "conversationTitle": "Tuesday DB choice",
+        "role": "assistant",
+        "createdAt": "2026-11-03T15:02:00.000Z",
+        "content": "Supabase Pro is $25/month base. Neon Scale is $69/month plus compute unit hours."
+      },
+      {
+        "conversationTitle": "September ACID chat",
+        "role": "user",
+        "createdAt": "2026-09-10T10:00:00.000Z",
+        "content": "Is Postgres ACID compliant?"
+      },
+      {
+        "conversationTitle": "September ACID chat",
+        "role": "assistant",
+        "createdAt": "2026-09-10T10:01:00.000Z",
+        "content": "Yes, Postgres is fully ACID compliant."
+      }
+    ],
+    "prompt": "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since?",
+    "expectedIntent": "change_monitoring",
+    "expectedSearch": true,
+    "expectedHistoryHit": true,
+    "expectedHistoricalEntities": ["Neon", "Supabase"],
+    "passCriteria": [
+      "Tuesday's Neon/Supabase turns are returned instead of the September ACID chat",
+      "The assistant answer containing the baseline prices is retained, not just the user question",
+      "Topic words found outside the named day do not veto that day",
+      "Confidence reflects date evidence without overclaiming a topic match"
+    ]
+  },
+  {
     "id": "eval-5-no-unnecessary-search",
     "name": "Journey E: Stable conceptual explanation without search",
     "description": "User asks a stable conceptual database question.",

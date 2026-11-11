@@ -89,4 +89,32 @@ describe('Intent Classification and Input Builder', () => {
     expect(lastMsg.content).toContain('Shortlist 5 CRMs');
     expect(lastMsg.content).toContain('Has any of them changed pricing since?');
   });
+
+  it('does not inject honest fallback or missing topic note for simple greetings or non-historical queries', () => {
+    const temporal: TemporalResolution = {
+      hasDate: false,
+      startDate: null,
+      endDate: null,
+      rawExpression: null,
+      resolvedDisplay: null,
+      confidence: 'none',
+      timezone: 'UTC',
+    };
+
+    const input = buildAgentInput({
+      userMessage: 'Hello Sift!',
+      userTimezone: 'UTC',
+      referenceDate: new Date('2026-11-10T12:00:00Z'),
+      recentMessages: [],
+      historicalExcerpts: [],
+      temporal,
+      requiresSearch: false,
+      intent: 'general_chat',
+    });
+
+    const userTurn = input.inputItems[input.inputItems.length - 1].content;
+    expect(userTurn).not.toContain('No prior conversation records discussing');
+    expect(userTurn).not.toContain('No historical conversation was found');
+    expect(userTurn).toBe('User prompt: Hello Sift!');
+  });
 });

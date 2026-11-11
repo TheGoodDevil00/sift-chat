@@ -4,6 +4,7 @@ import {
   getCanonicalUrl,
   normalizeCitations,
   normalizeSources,
+  extractCitationsFromText,
 } from '@/lib/citations/normalize';
 import { parseAndNormalizeResponse } from '@/lib/agent/response-normalizer';
 
@@ -87,5 +88,36 @@ describe('Citations and Source Normalization', () => {
     expect(parsed.citations[0].url).toBe('https://close.com/pricing');
     expect(parsed.citations[0].start_index).toBe(43);
     expect(parsed.sources.length).toBe(2);
+  });
+
+  it('extracts bare URLs and markdown links, stripping trailing punctuation and validating against consulted evidence', () => {
+    const text = 'Supabase Pro costs $25/month according to https://supabase.com/pricing. Also see [Neon Pricing](https://neon.tech/pricing) and unconsulted https://fake-news-scam.com.';
+    const consulted = [
+      { url: 'https://supabase.com/pricing', title: 'Supabase Pricing' },
+      { url: 'https://neon.tech/pricing', title: 'Neon Serverless Postgres Pricing' },
+    ];
+
+    const citations = extractCitationsFromText(text, 'msg-1', consulted);
+    expect(citations.length).toBe(2);
+    expect(citations.map((c) => c.canonical_url)).toEqual([
+      'https://neon.tech/pricing',
+      'https://supabase.com/pricing',
+    ]);
+    expect(citations.find((c) => c.canonical_url.includes('supabase.com'))?.url).toBe('https://supabase.com/pricing');
+    expect(citations.some((c) => c.url.includes('fake-news-scam'))).toBe(false);
+  });
+
+  it('drops every citation when no evidence was consulted, including plausible domain matches', () => {
+    const text =
+      'According to [HubSpot Pricing](https://hubspot.com/pricing) and https://close.com/pricing, prices changed.';
+
+    // The agent did not actually retrieve these URLs this turn.
+    expect(extractCitationsFromText(text, 'msg-empty', [])).toEqual([]);
+
+    // A different page on a consulted domain is not grounded either.
+    const domainOnly = extractCitationsFromText(text, 'msg-domain', [
+      { url: 'https://hubspot.com/blog', title: 'HubSpot Blog' },
+    ]);
+    expect(domainOnly).toEqual([]);
   });
 });

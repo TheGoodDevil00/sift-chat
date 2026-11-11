@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '@/lib/db/migrations';
+import { setDbForTesting } from '@/lib/db/client';
 import { createConversation, getConversation } from '@/lib/db/repositories/conversations';
 import { insertMessage } from '@/lib/db/repositories/messages';
 import { POST as chatHandler } from '@/app/api/chat/route';
@@ -13,11 +14,22 @@ import { POST as modelsHandler } from '@/app/api/models/route';
 import { GET as getRunsHandler } from '@/app/api/runs/route';
 import { GET as getStreamHandler } from '@/app/api/chat/stream/route';
 import { POST as cancelChatHandler } from '@/app/api/chat/cancel/route';
+import { runManager } from '@/lib/agent/run-manager';
 import { NextRequest } from 'next/server';
 
 describe('API Routes Integration', () => {
+  let db: Database.Database;
+
   beforeEach(() => {
-    // In-memory or temporary db setup
+    db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    runMigrations(db);
+    setDbForTesting(db);
+  });
+
+  afterEach(() => {
+    setDbForTesting(null);
+    db.close();
   });
 
   it('rejects invalid chat requests with 400 INVALID_REQUEST', async () => {
@@ -106,6 +118,35 @@ describe('API Routes Integration', () => {
     }
   });
 
+  it('rejects custom base URLs that target private or metadata addresses', async () => {
+    const req = new NextRequest('http://localhost:3000/api/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: 'groq',
+        apiKey: 'gsk_test123',
+        customBaseUrl: 'http://169.254.169.254/latest/meta-data',
+      }),
+    });
+    const res = await modelsHandler(req);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain('private, link-local, or metadata');
+  });
+
+  it('requires a client-supplied key for a custom remote endpoint', async () => {
+    const req = new NextRequest('http://localhost:3000/api/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: 'groq',
+        customBaseUrl: 'https://example.com/v1',
+      }),
+    });
+    const res = await modelsHandler(req);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain('requires your own API key');
+  });
+
   it('lists active runs via GET /api/runs', async () => {
     const res = await getRunsHandler();
     expect(res.status).toBe(200);
@@ -119,14 +160,42 @@ describe('API Routes Integration', () => {
     expect(res.status).toBe(404);
   });
 
-  it('cancels chat task via POST /api/chat/cancel', async () => {
-    const req = new NextRequest('http://localhost:3000/api/chat/cancel', {
+  it('cancels active chat task via POST /api/chat/cancel and returns 404 for inactive run', async () => {
+    // 1. Register an active running task
+    const abortController = new AbortController();
+    runManager.registerActiveRunForTesting({
+      runId: 'test-run-1',
+      conversationId: 'test-cancel-id',
+      userMessageId: 'user-1',
+      assistantMessageId: 'asst-1',
+      status: 'running',
+      phase: 'searching_web',
+      timezone: 'UTC',
+      accumulatedText: 'partial',
+      accumulatedThinking: '',
+      startedAt: new Date().toISOString(),
+      abortController,
+      listeners: new Set(),
+    });
+
+    const cancelReq = new NextRequest('http://localhost:3000/api/chat/cancel', {
       method: 'POST',
       body: JSON.stringify({ conversationId: 'test-cancel-id' }),
     });
-    const res = await cancelChatHandler(req);
-    expect(res.status).toBe(200);
-    const data = await res.json();
-    expect(data.success).toBe(true);
+    const cancelRes = await cancelChatHandler(cancelReq);
+    expect(cancelRes.status).toBe(200);
+    const cancelData = await cancelRes.json();
+    expect(cancelData.success).toBe(true);
+    expect(cancelData.cancelled).toBe(true);
+
+    // 2. When run no longer exists or conversation is inactive
+    const missingReq = new NextRequest('http://localhost:3000/api/chat/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: 'test-cancel-id' }),
+    });
+    const missingRes = await cancelChatHandler(missingReq);
+    expect(missingRes.status).toBe(404);
+    const missingData = await missingRes.json();
+    expect(missingData.cancelled).toBe(false);
   });
 });
