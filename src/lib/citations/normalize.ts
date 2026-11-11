@@ -72,11 +72,15 @@ export function normalizeCitations(
   source_metadata_json: string | null;
 }> {
   const result = [];
+  const seenCanonical = new Set<string>();
 
   for (const c of citations) {
     if (!c.url || !isValidHttpUrl(c.url)) continue;
 
     const canonical = getCanonicalUrl(c.url);
+    if (seenCanonical.has(canonical)) continue;
+    seenCanonical.add(canonical);
+
     result.push({
       message_id: messageId,
       url: c.url.trim(),
@@ -131,11 +135,13 @@ export function normalizeSources(
 
 /**
  * Extracts and validates citations directly from assistant markdown answer text.
- * Finds [label](url) links, verifies valid HTTP(S), and records start/end character offsets.
+ * Finds [label](url) markdown links AND bare URLs (e.g. https://supabase.com/pricing).
+ * Verifies valid HTTP(S), strips trailing punctuation, and validates grounding against consulted evidence.
  */
 export function extractCitationsFromText(
   text: string,
-  messageId: string
+  messageId: string,
+  consultedEvidence?: Array<{ url: string; title?: string }>
 ): Array<{
   message_id: string;
   url: string;
@@ -146,6 +152,9 @@ export function extractCitationsFromText(
   source_metadata_json: string | null;
 }> {
   const rawCitations: RawCitationInput[] = [];
+  const occupiedRanges: Array<{ start: number; end: number }> = [];
+
+  // A. Extract markdown links [label](url)
   const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g;
   let match: RegExpExecArray | null;
 
@@ -154,6 +163,7 @@ export function extractCitationsFromText(
     const url = match[2].trim();
     const start_index = match.index;
     const end_index = match.index + match[0].length;
+    occupiedRanges.push({ start: start_index, end: end_index });
 
     if (isValidHttpUrl(url)) {
       rawCitations.push({
@@ -161,10 +171,83 @@ export function extractCitationsFromText(
         title,
         start_index,
         end_index,
-        source_metadata_json: JSON.stringify({ match: match[0] }),
+        source_metadata_json: JSON.stringify({ type: 'markdown_link', match: match[0] }),
       });
     }
   }
 
-  return normalizeCitations(rawCitations, messageId);
+  // B. Extract bare URLs (e.g. https://supabase.com/pricing)
+  const bareUrlRegex = /\bhttps?:\/\/[^\s<>"'{}|\\^`\[\]]+/g;
+  let bareMatch: RegExpExecArray | null;
+
+  while ((bareMatch = bareUrlRegex.exec(text)) !== null) {
+    const startIndex = bareMatch.index;
+    const rawMatchText = bareMatch[0];
+
+    // Check if this falls inside any markdown link already extracted
+    const isInsideMarkdownLink = occupiedRanges.some(
+      (r) => startIndex >= r.start && startIndex < r.end
+    );
+    if (isInsideMarkdownLink) continue;
+
+    // Clean trailing punctuation like ., ;, ), ], etc.
+    const cleanUrl = rawMatchText.replace(/[.,;:!?)\]'">]+$/, '');
+    const endIndex = startIndex + cleanUrl.length;
+
+    if (isValidHttpUrl(cleanUrl)) {
+      rawCitations.push({
+        url: cleanUrl,
+        title: cleanUrl.replace(/^https?:\/\/(www\.)?/, ''),
+        start_index: startIndex,
+        end_index: endIndex,
+        source_metadata_json: JSON.stringify({ type: 'bare_url', match: cleanUrl }),
+      });
+    }
+  }
+
+  // C. Normalize and Validate against Consulted Evidence
+  const normalized = normalizeCitations(rawCitations, messageId);
+
+  // When the caller supplied evidence (even an empty list), grounding is strict:
+  // every returned citation must correspond to a URL the agent actually retrieved.
+  // A plausible-looking URL invented by the model is not a citation.
+  if (consultedEvidence !== undefined) {
+    const consultedMap = new Map<string, { url: string; title?: string }>();
+    for (const ev of consultedEvidence) {
+      if (ev.url) {
+        consultedMap.set(getCanonicalUrl(ev.url), ev);
+      }
+    }
+
+    const groundedList = [];
+    for (const cit of normalized) {
+      const matchInEvidence = consultedMap.get(cit.canonical_url);
+      if (!matchInEvidence) continue;
+
+      let originalMetadata: Record<string, unknown> = {};
+      if (cit.source_metadata_json) {
+        try {
+          const parsed = JSON.parse(cit.source_metadata_json);
+          if (parsed && typeof parsed === 'object') originalMetadata = parsed;
+        } catch {
+          // Keep malformed metadata out of the grounded record rather than dropping the citation.
+        }
+      }
+
+      groundedList.push({
+        ...cit,
+        title: cit.title || matchInEvidence.title || null,
+        source_metadata_json: JSON.stringify({
+          ...originalMetadata,
+          grounded: true,
+          verifiedAgainstConsultedEvidence: true,
+          evidenceUrl: matchInEvidence.url,
+        }),
+      });
+    }
+
+    return groundedList;
+  }
+
+  return normalized;
 }
