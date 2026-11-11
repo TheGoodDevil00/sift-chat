@@ -56,13 +56,13 @@ export const ChatRequestSchema = z.object({
       message: 'conversationId must be a valid UUID or null',
     }),
   message: z
-    .string({ required_error: 'message is required' })
+    .string({ message: 'message is required' })
     .transform((s) => s.trim())
     .refine((s) => s.length > 0, { message: 'message must not be empty' })
     .refine((s) => s.length <= 12000, { message: 'message must not exceed 12,000 characters' }),
   timezone: z.string().optional().default('UTC'),
   clientRequestId: z
-    .string({ required_error: 'clientRequestId is required' })
+    .string({ message: 'clientRequestId is required' })
     .transform((s) => s.trim())
     .refine((s) => s.length > 0, { message: 'clientRequestId must not be empty' }),
   providerConfig: ClientProviderConfigSchema.optional(),
