@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { listProviderModels, PROVIDER_FALLBACK_MODELS } from '@/lib/agent/providers/list-models';
 import { getConfig } from '@/lib/config';
 import { scrubSensitiveStrings } from '@/lib/crypto/scrub';
+import { validateCustomBaseUrl } from '@/lib/security/endpoint';
 import type { SupportedProvider } from '@/types/chat';
 
 export const dynamic = 'force-dynamic';
@@ -36,6 +37,30 @@ export async function POST(req: NextRequest) {
     }
 
     const { provider, apiKey, customBaseUrl } = parsed.data;
+    const typedProvider = provider as SupportedProvider;
+    const isLocalProvider = typedProvider === 'ollama' || typedProvider === 'local';
+
+    // A custom base URL is a client-chosen destination. Never send a server-side
+    // provider key there, and never let it target private/SSRF-prone addresses.
+    let safeCustomBaseUrl: string | undefined;
+    if (customBaseUrl) {
+      const endpoint = validateCustomBaseUrl(customBaseUrl, typedProvider, {
+        allowLoopback: isLocalProvider || process.env.NODE_ENV !== 'production',
+      });
+      if (!endpoint.ok) {
+        return NextResponse.json({ error: endpoint.reason }, { status: 400 });
+      }
+      if (!isLocalProvider && !apiKey?.trim()) {
+        return NextResponse.json(
+          {
+            error:
+              'A custom base URL requires your own API key for that endpoint. Server-side keys are never used with custom URLs.',
+          },
+          { status: 400 }
+        );
+      }
+      safeCustomBaseUrl = endpoint.url;
+    }
 
     // Resolve API key: client-passed in-memory key takes precedence, fallback to server env
     let resolvedKey = apiKey?.trim();
@@ -91,9 +116,9 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await listProviderModels(
-      provider as SupportedProvider,
+      typedProvider,
       resolvedKey,
-      customBaseUrl
+      safeCustomBaseUrl
     );
 
     return NextResponse.json({
