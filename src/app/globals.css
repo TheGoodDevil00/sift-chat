@@ -23,6 +23,8 @@ body {
 /* Prose overrides matching chat-rsc design */
 .prose {
   line-height: 1.5;
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .prose h1 {
@@ -75,6 +77,8 @@ body {
   text-decoration: underline;
   text-decoration-thickness: 1.5px;
   text-decoration-color: #f97316;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .prose a:hover {
@@ -94,6 +98,7 @@ body {
   border-radius: 0.375rem;
   overflow-x: auto;
   font-size: 0.9em;
+  max-width: 100%;
 }
 
 .prose code {
@@ -102,11 +107,19 @@ body {
   padding: 0.15rem 0.3rem;
   border-radius: 0.25rem;
   font-size: 0.9em;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .prose pre code {
   background-color: transparent;
   padding: 0;
+}
+
+.prose img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.375rem;
 }
 
 .prose blockquote {
@@ -116,23 +129,128 @@ body {
   border-left: 3px solid #f97316;
   background-color: #fff7ed;
   border-radius: 0.25rem;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
+/*
+ Responsive Table Architecture
+ Prevents layout blowout on wide comparison tables and dense task lists
+*/
+.table-scroll-container {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 1.25rem 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+}
+
+/* Custom sleek scrollbar for horizontal table scrolling */
+.table-scroll-container::-webkit-scrollbar {
+  height: 7px;
+}
+.table-scroll-container::-webkit-scrollbar-track {
+  background: #f8fafc;
+  border-bottom-left-radius: 0.5rem;
+  border-bottom-right-radius: 0.5rem;
+}
+.table-scroll-container::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+.table-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Table layout and typography */
+.sift-table,
 .prose table {
   width: 100%;
-  border-collapse: collapse;
-  margin: 1rem 0;
-  font-size: 0.95em;
-}
-
-.prose th,
-.prose td {
-  border: 1px solid #d1d5db;
-  padding: 0.5rem 0.75rem;
+  min-width: 580px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.825rem;
+  line-height: 1.5;
   text-align: left;
 }
 
-.prose th {
-  background-color: #f3f4f6;
+.sift-table th,
+.prose table th {
+  background-color: #f8fafc;
+  color: #0f172a;
   font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.75rem 1rem;
+  border-bottom: 2px solid #e2e8f0;
+  border-right: 1px solid #f1f5f9;
+  white-space: nowrap;
+}
+
+.sift-table th:last-child,
+.prose table th:last-child {
+  border-right: none;
+}
+
+.sift-table td,
+.prose table td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #e2e8f0;
+  border-right: 1px solid #f1f5f9;
+  color: #334155;
+  vertical-align: top;
+  min-width: 140px;
+  max-width: 400px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.sift-table td:first-child,
+.prose table td:first-child {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.sift-table td:last-child,
+.prose table td:last-child {
+  border-right: none;
+}
+
+.sift-table tbody tr:last-child td,
+.prose table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Zebra striping for improved legibility across large amounts of tasks/rows */
+.sift-table tbody tr:nth-child(even),
+.prose table tbody tr:nth-child(even) {
+  background-color: #fbfcfe;
+}
+
+.sift-table tbody tr:hover,
+.prose table tbody tr:hover {
+  background-color: #f1f5f9;
+  transition: background-color 0.15s ease;
+}
+
+/* Links inside tables: wrap naturally so long URLs never stretch table columns */
+.sift-table td a,
+.prose table td a {
+  color: #c2410c;
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: #f97316;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.sift-table td a:hover,
+.prose table td a:hover {
+  color: #ea580c;
+  text-decoration-style: double;
 }

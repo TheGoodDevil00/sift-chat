@@ -24,10 +24,20 @@ md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
   return defaultRender(tokens, idx, options, env, self);
 };
 
+// Wrap markdown tables in a responsive scroll container to prevent layout blowout
+md.renderer.rules.table_open = function () {
+  return '<div class="table-scroll-container"><table class="sift-table">';
+};
+
+md.renderer.rules.table_close = function () {
+  return '</table></div>';
+};
+
 interface TextMessageProps {
   id?: string;
   role: 'user' | 'assistant';
   content: string;
+  thinking?: string | null;
   createdAt?: string;
   citations?: Citation[];
   sources?: Source[];
@@ -54,11 +64,15 @@ export function TextMessage({
     }
   }
 
-  const renderedHtml = md.render(content || (isStreaming ? '...' : ''));
+  const renderedHtml = content
+    ? md.render(content)
+    : isStreaming
+    ? md.render('...')
+    : '';
 
   return (
     <div
-      className={`border rounded-lg p-4 transition-colors ${
+      className={`border rounded-lg p-4 transition-colors max-w-full min-w-0 overflow-hidden ${
         isAssistant
           ? 'bg-neutral-50 border-gray-200'
           : 'bg-white border-gray-300 ml-4 md:ml-12'
@@ -71,14 +85,20 @@ export function TextMessage({
         {timeString && <span>{timeString}</span>}
       </div>
 
-      <div
-        className="prose max-w-none text-sm leading-relaxed"
-        dangerouslySetInnerHTML={{ __html: renderedHtml }}
-      />
+      {renderedHtml ? (
+        <div
+          className="prose max-w-none text-sm leading-relaxed min-w-0 overflow-hidden break-words"
+          dangerouslySetInnerHTML={{ __html: renderedHtml }}
+        />
+      ) : isAssistant && !isStreaming ? (
+        <p className="text-sm text-gray-500 italic">
+          No response text was produced for this turn.
+        </p>
+      ) : null}
 
-      {isStreaming && (
+      {isStreaming && content ? (
         <span className="inline-block w-2 h-4 ml-1 bg-orange-500 animate-pulse align-middle" />
-      )}
+      ) : null}
 
       {/* Render Consulted Sources for Assistant messages */}
       {isAssistant && !isStreaming && (sources.length > 0 || citations.length > 0) && (

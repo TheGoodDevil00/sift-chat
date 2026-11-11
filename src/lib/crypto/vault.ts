@@ -8,7 +8,7 @@ export interface EncryptedRecord {
   updatedAt: string;
 }
 
-export type EncryptedVaultStore = Partial<Record<SupportedProvider, EncryptedRecord>>;
+export type EncryptedVaultStore = Partial<Record<SupportedProvider | string, EncryptedRecord>>;
 
 export interface ProviderKeyStatus {
   isConfigured: boolean;
@@ -21,7 +21,7 @@ const VAULT_SALT_KEY = 'sift_vault_salt_v1';
 const VAULT_DEVICE_KEY = 'sift_vault_device_id_v1';
 
 // In-memory decrypted cache (ephemeral, not exposed globally)
-const inMemoryKeyCache = new Map<SupportedProvider, string>();
+const inMemoryKeyCache = new Map<string, string>();
 let cachedDerivedKey: CryptoKey | null = null;
 
 // Helpers for byte array encoding/decoding across browser and node
@@ -166,7 +166,7 @@ function writeVaultStore(store: EncryptedVaultStore): void {
  * NEVER alters or deletes keys for other providers.
  */
 export async function saveProviderKey(
-  provider: SupportedProvider,
+  provider: SupportedProvider | string,
   plaintextKey: string
 ): Promise<void> {
   const trimmed = plaintextKey.trim();
@@ -217,7 +217,7 @@ export async function saveMultipleProviderKeys(
 /**
  * Decrypts and retrieves a provider's key from the AES-GCM encrypted vault.
  */
-export async function getProviderKey(provider: SupportedProvider): Promise<string | null> {
+export async function getProviderKey(provider: SupportedProvider | string): Promise<string | null> {
   // Check in-memory cache first
   if (inMemoryKeyCache.has(provider)) {
     return inMemoryKeyCache.get(provider) || null;
@@ -255,7 +255,7 @@ export async function getProviderKey(provider: SupportedProvider): Promise<strin
  * Removes a specific provider's key from the encrypted vault.
  * All other provider keys remain completely unaffected.
  */
-export async function removeProviderKey(provider: SupportedProvider): Promise<void> {
+export async function removeProviderKey(provider: SupportedProvider | string): Promise<void> {
   inMemoryKeyCache.delete(provider);
   const store = readVaultStore();
   if (store[provider]) {
@@ -269,10 +269,10 @@ export async function removeProviderKey(provider: SupportedProvider): Promise<vo
  * without needing to decrypt the actual keys.
  */
 export async function getVaultStatuses(): Promise<
-  Record<SupportedProvider, ProviderKeyStatus>
+  Record<SupportedProvider | 'exa' | 'firecrawl' | 'tavily' | string, ProviderKeyStatus>
 > {
   const store = readVaultStore();
-  const allProviders: SupportedProvider[] = [
+  const allProviders = [
     'groq',
     'openai',
     'anthropic',
@@ -283,9 +283,12 @@ export async function getVaultStatuses(): Promise<
     'openrouter',
     'ollama',
     'local',
+    'exa',
+    'firecrawl',
+    'tavily',
   ];
 
-  const statuses = {} as Record<SupportedProvider, ProviderKeyStatus>;
+  const statuses: Record<string, ProviderKeyStatus> = {};
   for (const p of allProviders) {
     const record = store[p];
     if (record && record.ciphertext) {

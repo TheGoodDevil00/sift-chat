@@ -34,7 +34,7 @@ export function MessageInput({
   return (
     <form
       onSubmit={handleSubmit}
-      className="max-w-4xl mx-auto w-full px-2 md:px-0 my-4 flex flex-row gap-2 sticky bottom-4 bg-[#fbfbfb]/90 backdrop-blur-sm pt-2"
+      className="flex flex-row gap-2 w-full"
     >
       <input
         ref={inputRef}

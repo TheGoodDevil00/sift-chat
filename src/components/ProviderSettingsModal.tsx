@@ -14,6 +14,11 @@ import { scrubSensitiveStrings } from '@/lib/crypto/scrub';
 
 export interface ProviderServerStatus {
   providers: Record<SupportedProvider, boolean>;
+  searchProviders?: {
+    exa: boolean;
+    firecrawl: boolean;
+    tavily: boolean;
+  };
   hasAnyKey: boolean;
   defaultProvider: SupportedProvider;
   defaultModels?: Record<SupportedProvider, string>;
@@ -83,6 +88,7 @@ export function ProviderSettingsModal({
   isSoftPrompt = false,
 }: ProviderSettingsModalProps) {
   // Navigation / Selection states
+  const [selectedSection, setSelectedSection] = useState<'providers' | 'web_search'>('providers');
   const [selectedProvider, setSelectedProvider] = useState<SupportedProvider>(
     activeConfig.provider || 'groq'
   );
@@ -92,13 +98,29 @@ export function ProviderSettingsModal({
 
   // Multi-provider key and model states (preserved across provider tab switches)
   const [vaultStatuses, setVaultStatuses] = useState<
-    Record<SupportedProvider, ProviderKeyStatus>
-  >({} as Record<SupportedProvider, ProviderKeyStatus>);
+    Record<string, ProviderKeyStatus>
+  >({});
 
   const [pendingKeys, setPendingKeys] = useState<Partial<Record<SupportedProvider, string>>>({});
   const [pendingModels, setPendingModels] = useState<Partial<Record<SupportedProvider, string>>>({});
   const [pendingUrls, setPendingUrls] = useState<Partial<Record<SupportedProvider, string>>>({});
   const [showKeyMap, setShowKeyMap] = useState<Partial<Record<SupportedProvider, boolean>>>({});
+
+  // Web search provider keys state
+  const [searchKeys, setSearchKeys] = useState<{ exa: string; firecrawl: string; tavily: string }>({
+    exa: '',
+    firecrawl: '',
+    tavily: '',
+  });
+  const [showSearchKey, setShowSearchKey] = useState<{
+    exa: boolean;
+    firecrawl: boolean;
+    tavily: boolean;
+  }>({
+    exa: false,
+    firecrawl: false,
+    tavily: false,
+  });
 
   // Model discovery states
   const [modelsByProvider, setModelsByProvider] = useState<
@@ -111,37 +133,107 @@ export function ProviderSettingsModal({
   const [isSaving, setIsSaving] = useState<boolean>(false);
 
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const prevIsOpenRef = useRef(false);
+  const inFlightRef = useRef<Record<string, AbortController>>({});
+
+  // Refs to access latest state values without causing fetchLiveModels to re-create
+  const pendingKeysRef = useRef(pendingKeys);
+  const pendingUrlsRef = useRef(pendingUrls);
+  const serverStatusRef = useRef(serverStatus);
+  const modelsByProviderRef = useRef(modelsByProvider);
+
+  useEffect(() => {
+    pendingKeysRef.current = pendingKeys;
+    pendingUrlsRef.current = pendingUrls;
+    serverStatusRef.current = serverStatus;
+    modelsByProviderRef.current = modelsByProvider;
+  });
+
+  // Cleanup timers & in-flight requests on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      Object.values(inFlightRef.current).forEach((controller) => {
+        controller.abort();
+      });
+      inFlightRef.current = {};
+    };
+  }, []);
 
   // Refresh vault statuses & run legacy migration when modal opens
   const refreshVault = useCallback(async () => {
     try {
       await migrateLegacyPlaintextKeys();
       const statuses = await getVaultStatuses();
-      setVaultStatuses(statuses);
+      setVaultStatuses(statuses as any);
+
+      const [savedExa, savedFirecrawl, savedTavily] = await Promise.all([
+        getProviderKey('exa'),
+        getProviderKey('firecrawl'),
+        getProviderKey('tavily'),
+      ]);
+      setSearchKeys({
+        exa: savedExa || '',
+        firecrawl: savedFirecrawl || '',
+        tavily: savedTavily || '',
+      });
     } catch (err) {
       console.warn('Failed to inspect encrypted vault status:', err);
     }
   }, []);
 
   // Fetch live models directly from provider /models endpoint
+  // Zero-dependency callback to guarantee a completely stable function reference
   const fetchLiveModels = useCallback(
-    async (prov: SupportedProvider, explicitKey?: string, explicitUrl?: string) => {
-      const trimmedKey = explicitKey !== undefined ? explicitKey.trim() : (pendingKeys[prov] || '').trim();
+    async (
+      prov: SupportedProvider,
+      explicitKey?: string,
+      explicitUrl?: string,
+      force = false
+    ) => {
+      // Return cached models if already fetched and not forced
+      if (
+        !force &&
+        modelsByProviderRef.current[prov] &&
+        modelsByProviderRef.current[prov]!.length > 0
+      ) {
+        return;
+      }
+
+      // Abort any existing in-flight request for this provider
+      if (inFlightRef.current[prov]) {
+        inFlightRef.current[prov].abort();
+      }
+
+      const controller = new AbortController();
+      inFlightRef.current[prov] = controller;
+
+      const trimmedKey =
+        explicitKey !== undefined
+          ? explicitKey.trim()
+          : (pendingKeysRef.current[prov] || '').trim();
       const hasDecrypted = await getProviderKey(prov);
       const effectiveKey = trimmedKey || hasDecrypted || '';
-      const hasServerKey = serverStatus?.providers[prov] ?? false;
+      const hasServerKey = serverStatusRef.current?.providers[prov] ?? false;
       const isLocal = prov === 'ollama' || prov === 'local';
       const isOpenRouter = prov === 'openrouter';
 
       const customUrl =
         explicitUrl !== undefined
           ? explicitUrl.trim()
-          : (pendingUrls[prov] || (typeof window !== 'undefined' ? localStorage.getItem(`sift_base_url_${prov}`) : null) || undefined);
+          : (pendingUrlsRef.current[prov] ||
+              (typeof window !== 'undefined'
+                ? localStorage.getItem(`sift_base_url_${prov}`)
+                : null) ||
+              undefined);
 
       if (!effectiveKey && !hasServerKey && !isLocal && !isOpenRouter) {
         setModelsByProvider((prev) => ({ ...prev, [prov]: [] }));
         setFetchError(null);
         setWarning(null);
+        delete inFlightRef.current[prov];
         return;
       }
 
@@ -158,11 +250,14 @@ export function ProviderSettingsModal({
             apiKey: effectiveKey || undefined,
             customBaseUrl: customUrl || undefined,
           }),
+          signal: controller.signal,
         });
 
         const data = await res.json();
         if (!res.ok) {
-          const errMsg = scrubSensitiveStrings(data.error || `Failed to fetch models from ${PROVIDER_LABELS[prov]}`);
+          const errMsg = scrubSensitiveStrings(
+            data.error || `Failed to fetch models from ${PROVIDER_LABELS[prov]}`
+          );
           setFetchError(errMsg);
           if (data.models && data.models.length > 0) {
             setModelsByProvider((prev) => ({ ...prev, [prov]: data.models }));
@@ -184,51 +279,56 @@ export function ProviderSettingsModal({
           }
         }
       } catch (err: any) {
-        setFetchError(`Network error contacting ${PROVIDER_LABELS[prov]} models endpoint.`);
+        if (err.name !== 'AbortError') {
+          setFetchError(`Network error contacting ${PROVIDER_LABELS[prov]} models endpoint.`);
+        }
       } finally {
+        delete inFlightRef.current[prov];
         setIsLoadingModels(false);
       }
     },
-    [pendingKeys, pendingUrls, serverStatus]
+    []
   );
 
-  // Initialize modal state on open
+  // Initialize modal state on open ONLY (guarded against re-renders & recursion)
   useEffect(() => {
-    if (!isOpen) return;
+    if (isOpen && !prevIsOpenRef.current) {
+      const initialProv = activeConfig.provider || 'groq';
+      setSelectedProvider(initialProv);
+      setActiveProvider(initialProv);
 
-    const initialProv = activeConfig.provider || 'groq';
-    setSelectedProvider(initialProv);
-    setActiveProvider(initialProv);
+      // Load stored models for all providers from localStorage
+      const initialModels: Partial<Record<SupportedProvider, string>> = {};
+      const initialUrls: Partial<Record<SupportedProvider, string>> = {};
+      for (const p of ALL_SUPPORTED_PROVIDERS) {
+        try {
+          const stored = localStorage.getItem(`sift_model_${p}`);
+          if (stored) {
+            initialModels[p] = stored;
+          } else if (p === activeConfig.provider && activeConfig.model) {
+            initialModels[p] = activeConfig.model;
+          }
 
-    // Load stored models for all providers from localStorage
-    const initialModels: Partial<Record<SupportedProvider, string>> = {};
-    const initialUrls: Partial<Record<SupportedProvider, string>> = {};
-    for (const p of ALL_SUPPORTED_PROVIDERS) {
-      try {
-        const stored = localStorage.getItem(`sift_model_${p}`);
-        if (stored) {
-          initialModels[p] = stored;
-        } else if (p === activeConfig.provider && activeConfig.model) {
-          initialModels[p] = activeConfig.model;
-        }
+          const storedUrl = localStorage.getItem(`sift_base_url_${p}`);
+          if (storedUrl) {
+            initialUrls[p] = storedUrl;
+          } else if (p === 'ollama') {
+            initialUrls[p] = 'http://localhost:11434/v1';
+          } else if (p === 'local') {
+            initialUrls[p] = 'http://localhost:1234/v1';
+          }
+        } catch {}
+      }
+      setPendingModels(initialModels);
+      setPendingUrls(initialUrls);
 
-        const storedUrl = localStorage.getItem(`sift_base_url_${p}`);
-        if (storedUrl) {
-          initialUrls[p] = storedUrl;
-        } else if (p === 'ollama') {
-          initialUrls[p] = 'http://localhost:11434/v1';
-        } else if (p === 'local') {
-          initialUrls[p] = 'http://localhost:1234/v1';
-        }
-      } catch {}
+      refreshVault().then(() => {
+        fetchLiveModels(initialProv);
+      });
     }
-    setPendingModels(initialModels);
-    setPendingUrls(initialUrls);
 
-    refreshVault().then(() => {
-      fetchLiveModels(initialProv);
-    });
-  }, [isOpen, activeConfig, refreshVault, fetchLiveModels]);
+    prevIsOpenRef.current = isOpen;
+  }, [isOpen, activeConfig.provider, activeConfig.model, refreshVault, fetchLiveModels]);
 
   if (!isOpen) return null;
 
@@ -239,6 +339,7 @@ export function ProviderSettingsModal({
   const showKey = showKeyMap[selectedProvider] ?? false;
 
   const handleSelectProvider = (prov: SupportedProvider) => {
+    setSelectedSection('providers');
     setSelectedProvider(prov);
     setFetchError(null);
     setWarning(null);
@@ -247,6 +348,19 @@ export function ProviderSettingsModal({
     // Fetch models if not already fetched for this provider
     if (!modelsByProvider[prov]) {
       fetchLiveModels(prov);
+    }
+  };
+
+  const handleRemoveSearchKey = async (providerName: 'exa' | 'firecrawl' | 'tavily') => {
+    if (!window.confirm(`Are you sure you want to remove your key for ${providerName.toUpperCase()}?`)) {
+      return;
+    }
+    try {
+      await removeProviderKey(providerName);
+      setSearchKeys((prev) => ({ ...prev, [providerName]: '' }));
+      await refreshVault();
+    } catch (err) {
+      console.warn('Failed to remove search key:', err);
     }
   };
 
@@ -259,7 +373,7 @@ export function ProviderSettingsModal({
 
     if (newKey.trim().length > 6) {
       debounceTimerRef.current = setTimeout(() => {
-        fetchLiveModels(prov, newKey);
+        fetchLiveModels(prov, newKey, undefined, true);
       }, 700);
     }
   };
@@ -314,12 +428,23 @@ export function ProviderSettingsModal({
         }
       }
 
-      // 3. Persist active provider choice
+      // 3. Persist search provider keys to encrypted vault
+      if (searchKeys.exa !== undefined) {
+        await saveProviderKey('exa', searchKeys.exa.trim());
+      }
+      if (searchKeys.firecrawl !== undefined) {
+        await saveProviderKey('firecrawl', searchKeys.firecrawl.trim());
+      }
+      if (searchKeys.tavily !== undefined) {
+        await saveProviderKey('tavily', searchKeys.tavily.trim());
+      }
+
+      // 4. Persist active provider choice
       try {
         localStorage.setItem('sift_active_provider', activeProvider);
       } catch {}
 
-      // 4. Resolve active provider config
+      // 5. Resolve active provider config
       const activeDecryptedKey = await getProviderKey(activeProvider);
       const activeModel =
         pendingModels[activeProvider]?.trim() ||
@@ -340,6 +465,11 @@ export function ProviderSettingsModal({
         model: activeModel,
         apiKey: activeDecryptedKey || undefined,
         customBaseUrl: activeCustomBaseUrl,
+        searchKeys: {
+          exa: searchKeys.exa.trim() || undefined,
+          firecrawl: searchKeys.firecrawl.trim() || undefined,
+          tavily: searchKeys.tavily.trim() || undefined,
+        },
       });
 
       onClose();
@@ -388,7 +518,7 @@ export function ProviderSettingsModal({
             {ALL_SUPPORTED_PROVIDERS.map((p) => {
               const status = vaultStatuses[p];
               const hasServKey = serverStatus?.providers[p] ?? false;
-              const isSelected = selectedProvider === p;
+              const isSelected = selectedSection === 'providers' && selectedProvider === p;
               const isActive = activeProvider === p;
               const isConfigured = Boolean(status?.isConfigured || hasServKey || pendingKeys[p]);
 
@@ -427,40 +557,279 @@ export function ProviderSettingsModal({
                 </button>
               );
             })}
+
+            {/* Search Engines Navigation */}
+            <div className="pt-2 mt-2 border-t border-gray-200">
+              <div className="hidden md:block px-2 py-1 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                Live Web Search
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedSection('web_search')}
+                className={`w-full text-left px-3 py-2 rounded text-xs flex items-center justify-between cursor-pointer transition-colors ${
+                  selectedSection === 'web_search'
+                    ? 'bg-white border-2 border-orange-500 font-bold text-gray-950 shadow-xs'
+                    : 'border border-transparent hover:bg-gray-100 text-gray-700'
+                }`}
+              >
+                <div className="flex flex-col">
+                  <span className="font-semibold flex items-center gap-1.5">
+                    <span>🔍</span>
+                    <span>Exa & Firecrawl</span>
+                  </span>
+                  <span className="text-[10px] text-gray-400 font-normal">
+                    {searchKeys.exa ||
+                    searchKeys.firecrawl ||
+                    vaultStatuses['exa']?.isConfigured ||
+                    vaultStatuses['firecrawl']?.isConfigured ||
+                    serverStatus?.searchProviders?.exa ||
+                    serverStatus?.searchProviders?.firecrawl ? (
+                      <span className="text-emerald-700 flex items-center gap-1">
+                        <span>●</span>
+                        <span>Configured</span>
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">○ Keyless Fallback</span>
+                    )}
+                  </span>
+                </div>
+              </button>
+            </div>
           </div>
 
           {/* Provider Details & Configuration Panel (Right Pane) */}
           <div className="flex-1 p-4 md:p-6 overflow-y-auto space-y-4">
-            {/* Active Provider Status Banner */}
-            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-              <div>
-                <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
-                  <span>{PROVIDER_LABELS[selectedProvider]}</span>
-                  {activeProvider === selectedProvider ? (
-                    <span className="text-[10px] px-2 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded font-semibold">
-                      ✓ Active for Research
+            {selectedSection === 'web_search' ? (
+              <div className="space-y-4">
+                <div className="pb-3 border-b border-gray-100">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-bold text-gray-900">Live Web Search Providers</h3>
+                    <span className="text-[10px] px-2 py-0.5 bg-blue-100 text-blue-800 border border-blue-300 rounded font-semibold">
+                      Free Tiers (Zero Credit Card)
                     </span>
-                  ) : (
-                    <span className="text-[10px] text-gray-400 font-normal">
-                      Inactive
-                    </span>
-                  )}
-                </h3>
-                <p className="text-xs text-gray-500 font-sans mt-0.5">
-                  {PROVIDER_DESCRIPTIONS[selectedProvider]}
-                </p>
-              </div>
+                  </div>
+                  <p className="text-xs text-gray-500 font-sans mt-0.5">
+                    Sift uses a 2-stage search architecture: <strong>Exa</strong> for neural semantic search and <strong>Firecrawl</strong> for headless Chromium rendering of dynamic JS pricing pages. Sift also works out-of-the-box with built-in keyless fallback search.
+                  </p>
+                </div>
 
-              {activeProvider !== selectedProvider && (
-                <button
-                  type="button"
-                  onClick={() => setActiveProvider(selectedProvider)}
-                  className="px-2.5 py-1 text-xs border border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-800 rounded font-medium cursor-pointer transition-colors"
-                >
-                  Set as Active
-                </button>
-              )}
-            </div>
+                {/* Exa AI Card */}
+                <div className="p-3.5 border-2 border-gray-200 rounded-lg space-y-2 bg-white">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-sm text-gray-900">Exa AI (Primary Neural Search)</span>
+                      <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-800 rounded font-semibold uppercase">
+                        Recommended
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-500">
+                      {vaultStatuses['exa']?.isConfigured ? (
+                        <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                          <span>● Encrypted Vault</span>
+                          <span className="font-mono text-[10px]">({vaultStatuses['exa']?.fingerprint})</span>
+                        </span>
+                      ) : serverStatus?.searchProviders?.exa ? (
+                        <span className="text-emerald-700 font-semibold">● Configured in Server .env</span>
+                      ) : (
+                        <span className="text-amber-700 font-semibold">○ Not set</span>
+                      )}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-600 font-sans">
+                    Neural search understanding meaning, filtering changes since specific dates, and extracting targeted sentence highlights. Free tier: <strong>$10/month recurring</strong> (~2,500 searches) at{' '}
+                    <a href="https://exa.ai" target="_blank" rel="noreferrer" className="text-blue-600 underline">
+                      exa.ai
+                    </a>{' '}
+                    (no card needed).
+                  </p>
+                  <div className="flex items-center gap-2 pt-1">
+                    <input
+                      type={showSearchKey.exa ? 'text' : 'password'}
+                      value={searchKeys.exa}
+                      onChange={(e) => setSearchKeys((prev) => ({ ...prev, exa: e.target.value }))}
+                      placeholder={
+                        vaultStatuses['exa']?.fingerprint
+                          ? `Saved: ${vaultStatuses['exa']?.fingerprint}`
+                          : serverStatus?.searchProviders?.exa
+                          ? 'Using server EXA_API_KEY from .env'
+                          : 'Paste EXA_API_KEY (starts with exa-...)...'
+                      }
+                      className="flex-1 p-2 border border-gray-300 rounded font-mono text-xs focus:border-orange-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowSearchKey((prev) => ({ ...prev, exa: !prev.exa }))}
+                      className="px-2.5 py-1.5 border border-gray-300 hover:bg-gray-50 rounded text-xs text-gray-600 cursor-pointer"
+                    >
+                      {showSearchKey.exa ? 'Hide' : 'Show'}
+                    </button>
+                    {vaultStatuses['exa']?.isConfigured && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveSearchKey('exa')}
+                        className="px-2.5 py-1.5 border border-red-300 hover:bg-red-50 rounded text-xs text-red-600 cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Firecrawl Card */}
+                <div className="p-3.5 border-2 border-gray-200 rounded-lg space-y-2 bg-white">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-sm text-gray-900">Firecrawl (Secondary Deep Scraper)</span>
+                      <span className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-800 rounded font-semibold uppercase">
+                        JS Renderer
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-500">
+                      {vaultStatuses['firecrawl']?.isConfigured ? (
+                        <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                          <span>● Encrypted Vault</span>
+                          <span className="font-mono text-[10px]">({vaultStatuses['firecrawl']?.fingerprint})</span>
+                        </span>
+                      ) : serverStatus?.searchProviders?.firecrawl ? (
+                        <span className="text-emerald-700 font-semibold">● Configured in Server .env</span>
+                      ) : (
+                        <span className="text-amber-700 font-semibold">○ Not set</span>
+                      )}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-600 font-sans">
+                    Renders client-side JavaScript on dynamic pricing pages (React/Next.js e.g. Supabase, Neon) using headless Chromium and extracts clean markdown tables. Free tier: <strong>1,000 credits/month</strong> at{' '}
+                    <a href="https://firecrawl.dev" target="_blank" rel="noreferrer" className="text-blue-600 underline">
+                      firecrawl.dev
+                    </a>{' '}
+                    (no card needed).
+                  </p>
+                  <div className="flex items-center gap-2 pt-1">
+                    <input
+                      type={showSearchKey.firecrawl ? 'text' : 'password'}
+                      value={searchKeys.firecrawl}
+                      onChange={(e) => setSearchKeys((prev) => ({ ...prev, firecrawl: e.target.value }))}
+                      placeholder={
+                        vaultStatuses['firecrawl']?.fingerprint
+                          ? `Saved: ${vaultStatuses['firecrawl']?.fingerprint}`
+                          : serverStatus?.searchProviders?.firecrawl
+                          ? 'Using server FIRECRAWL_API_KEY from .env'
+                          : 'Paste FIRECRAWL_API_KEY (starts with fc-...)...'
+                      }
+                      className="flex-1 p-2 border border-gray-300 rounded font-mono text-xs focus:border-orange-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowSearchKey((prev) => ({ ...prev, firecrawl: !prev.firecrawl }))}
+                      className="px-2.5 py-1.5 border border-gray-300 hover:bg-gray-50 rounded text-xs text-gray-600 cursor-pointer"
+                    >
+                      {showSearchKey.firecrawl ? 'Hide' : 'Show'}
+                    </button>
+                    {vaultStatuses['firecrawl']?.isConfigured && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveSearchKey('firecrawl')}
+                        className="px-2.5 py-1.5 border border-red-300 hover:bg-red-50 rounded text-xs text-red-600 cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Tavily Card */}
+                <div className="p-3.5 border-2 border-gray-200 rounded-lg space-y-2 bg-white">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-sm text-gray-900">Tavily Search (Optional Fallback)</span>
+                    <span className="text-[11px] text-gray-500">
+                      {vaultStatuses['tavily']?.isConfigured ? (
+                        <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                          <span>● Encrypted Vault</span>
+                          <span className="font-mono text-[10px]">({vaultStatuses['tavily']?.fingerprint})</span>
+                        </span>
+                      ) : serverStatus?.searchProviders?.tavily ? (
+                        <span className="text-emerald-700 font-semibold">● Configured in Server .env</span>
+                      ) : (
+                        <span className="text-gray-400">○ Not set</span>
+                      )}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-600 font-sans">
+                    General search API fallback. Free trial available at{' '}
+                    <a href="https://tavily.com" target="_blank" rel="noreferrer" className="text-blue-600 underline">
+                      tavily.com
+                    </a>.
+                  </p>
+                  <div className="flex items-center gap-2 pt-1">
+                    <input
+                      type={showSearchKey.tavily ? 'text' : 'password'}
+                      value={searchKeys.tavily}
+                      onChange={(e) => setSearchKeys((prev) => ({ ...prev, tavily: e.target.value }))}
+                      placeholder={
+                        vaultStatuses['tavily']?.fingerprint
+                          ? `Saved: ${vaultStatuses['tavily']?.fingerprint}`
+                          : serverStatus?.searchProviders?.tavily
+                          ? 'Using server TAVILY_API_KEY from .env'
+                          : 'Paste TAVILY_API_KEY (starts with tvly-...)...'
+                      }
+                      className="flex-1 p-2 border border-gray-300 rounded font-mono text-xs focus:border-orange-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowSearchKey((prev) => ({ ...prev, tavily: !prev.tavily }))}
+                      className="px-2.5 py-1.5 border border-gray-300 hover:bg-gray-50 rounded text-xs text-gray-600 cursor-pointer"
+                    >
+                      {showSearchKey.tavily ? 'Hide' : 'Show'}
+                    </button>
+                    {vaultStatuses['tavily']?.isConfigured && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveSearchKey('tavily')}
+                        className="px-2.5 py-1.5 border border-red-300 hover:bg-red-50 rounded text-xs text-red-600 cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Keyless Fallback Notice */}
+                <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-md text-emerald-900 text-xs">
+                  <strong>Keyless Search Active:</strong> If no API keys are entered, Sift automatically uses built-in free web search so your research queries always work out of the box. Adding Exa or Firecrawl enhances accuracy with neural semantic ranking and dynamic Chromium JS rendering.
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Active Provider Status Banner */}
+                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+                  <div>
+                    <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                      <span>{PROVIDER_LABELS[selectedProvider]}</span>
+                      {activeProvider === selectedProvider ? (
+                        <span className="text-[10px] px-2 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded font-semibold">
+                          ✓ Active for Research
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-gray-400 font-normal">
+                          Inactive
+                        </span>
+                      )}
+                    </h3>
+                    <p className="text-xs text-gray-500 font-sans mt-0.5">
+                      {PROVIDER_DESCRIPTIONS[selectedProvider]}
+                    </p>
+                  </div>
+
+                  {activeProvider !== selectedProvider && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveProvider(selectedProvider)}
+                      className="px-2.5 py-1 text-xs border border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-800 rounded font-medium cursor-pointer transition-colors"
+                    >
+                      Set as Active
+                    </button>
+                  )}
+                </div>
 
             {/* Local Server Endpoint URL (Ollama / Local Models) */}
             {(selectedProvider === 'ollama' || selectedProvider === 'local') && (
@@ -471,7 +840,7 @@ export function ProviderSettingsModal({
                   </label>
                   <button
                     type="button"
-                    onClick={() => fetchLiveModels(selectedProvider)}
+                    onClick={() => fetchLiveModels(selectedProvider, undefined, undefined, true)}
                     className="text-[11px] text-blue-600 hover:text-blue-800 font-semibold cursor-pointer"
                   >
                     Test Connection
@@ -555,7 +924,7 @@ export function ProviderSettingsModal({
                   )}
                   <button
                     type="button"
-                    onClick={() => fetchLiveModels(selectedProvider)}
+                    onClick={() => fetchLiveModels(selectedProvider, undefined, undefined, true)}
                     disabled={isLoadingModels}
                     className="text-[11px] text-blue-600 hover:text-blue-800 font-semibold cursor-pointer disabled:opacity-50"
                   >
@@ -638,7 +1007,7 @@ export function ProviderSettingsModal({
                   <span>⚠️ {warning}</span>
                   <button
                     type="button"
-                    onClick={() => fetchLiveModels(selectedProvider)}
+                    onClick={() => fetchLiveModels(selectedProvider, undefined, undefined, true)}
                     className="text-[11px] underline font-semibold ml-2 hover:text-amber-950"
                   >
                     Retry
@@ -652,7 +1021,7 @@ export function ProviderSettingsModal({
                   <span>✕ {fetchError}</span>
                   <button
                     type="button"
-                    onClick={() => fetchLiveModels(selectedProvider)}
+                    onClick={() => fetchLiveModels(selectedProvider, undefined, undefined, true)}
                     className="text-[11px] underline font-semibold ml-2 hover:text-red-950"
                   >
                     Retry
@@ -716,7 +1085,9 @@ export function ProviderSettingsModal({
               )}
             </div>
           </div>
-        </form>
+        )}
+      </div>
+    </form>
 
         {/* Modal Footer */}
         <div className="p-4 border-t border-gray-200 bg-gray-50/70 flex items-center justify-between">
