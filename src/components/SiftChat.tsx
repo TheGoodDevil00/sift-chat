@@ -180,6 +180,11 @@ export function SiftChat() {
               ☰
             </button>
             <h1 className="text-xl md:text-2xl font-bold tracking-tight uppercase flex items-center gap-2">
+              <img
+                src="/sift-favicon.png"
+                alt="Sift Logo"
+                className="w-6 h-6 rounded object-contain shrink-0"
+              />
               <span>Sift</span>
               <span className="text-xs font-normal text-gray-500 normal-case hidden sm:inline border-l pl-2 border-gray-300">
                 Temporal Web Research Agent
