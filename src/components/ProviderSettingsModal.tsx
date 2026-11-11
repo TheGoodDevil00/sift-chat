@@ -66,19 +66,6 @@ export const PROVIDER_LABELS: Record<SupportedProvider, string> = {
   local: 'LM Studio / Local (vLLM)',
 };
 
-export const PROVIDER_DESCRIPTIONS: Record<SupportedProvider, string> = {
-  groq: 'Ultra-fast Llama & DeepSeek inference',
-  openai: 'GPT-4o, o1, o3-mini models',
-  anthropic: 'Claude 3.5 Sonnet, Haiku, Opus',
-  gemini: 'Gemini 2.0 Flash, 1.5 Pro',
-  deepseek: 'DeepSeek V3 and R1 reasoning',
-  xai: 'Grok 2 and Grok Beta models',
-  cohere: 'Command R+ and Command R',
-  openrouter: 'Universal multi-provider gateway & free models',
-  ollama: 'Run open-weight models locally on your machine (http://localhost:11434)',
-  local: 'OpenAI-compatible local server (LM Studio, vLLM, LocalAI)',
-};
-
 export function ProviderSettingsModal({
   isOpen,
   onClose,
@@ -802,22 +789,21 @@ export function ProviderSettingsModal({
               <div className="space-y-4">
                 {/* Active Provider Status Banner */}
                 <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <div>
-                    <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
-                      <span>{PROVIDER_LABELS[selectedProvider]}</span>
-                      {activeProvider === selectedProvider ? (
-                        <span className="text-[10px] px-2 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded font-semibold">
-                          ✓ Active for Research
-                        </span>
-                      ) : (
-                        <span className="text-[10px] text-gray-400 font-normal">
-                          Inactive
-                        </span>
-                      )}
+                  <div className="flex items-center gap-2.5">
+                    <h3 className="text-base font-bold text-gray-900">
+                      {PROVIDER_LABELS[selectedProvider]}
                     </h3>
-                    <p className="text-xs text-gray-500 font-sans mt-0.5">
-                      {PROVIDER_DESCRIPTIONS[selectedProvider]}
-                    </p>
+                    {activeProvider === selectedProvider ? (
+                      <span className="inline-flex items-center gap-1.5 text-xs text-emerald-700 font-medium">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                        Active
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 text-xs text-gray-400 font-normal">
+                        <span className="w-1.5 h-1.5 rounded-full bg-gray-300" />
+                        Inactive
+                      </span>
+                    )}
                   </div>
 
                   {activeProvider !== selectedProvider && (
